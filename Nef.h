@@ -1,13 +1,13 @@
-#define Nef_Max 	500000
-#define NP_Max          500000
-#define W_Nmax (POLY_Dmax+1)
-#define MAXSTRING	100
+#define Nef_Max 500000
+#define NP_Max 500000
+#define W_Nmax (POLY_Dmax + 1)
+#define MAXSTRING 100
 
-#undef	WRITE_CWS
-#define	WRITE_CWS
+#undef WRITE_CWS
+#define WRITE_CWS
 
-#define Pos_Max   (POLY_Dmax + 2)
-#define FIB_POINT_Nmax  VERT_Nmax
+#define Pos_Max (POLY_Dmax + 2)
+#define FIB_POINT_Nmax VERT_Nmax
 
 typedef struct {
   Long W[FIB_Nmax][FIB_POINT_Nmax];
@@ -51,7 +51,7 @@ typedef struct {
 } Cone;
 
 typedef struct {
-  Long S[2*Pos_Max];
+  Long S[2 * Pos_Max];
 } SPoly;
 
 typedef struct {
@@ -59,12 +59,12 @@ typedef struct {
 } BPoly;
 
 typedef struct {
-  int E[4*(Pos_Max)][4*(Pos_Max)];
+  int E[4 * (Pos_Max)][4 * (Pos_Max)];
 } EPoly;
 
 typedef struct {
-    Long x[POINT_Nmax][W_Nmax];
-    int N, np;
+  Long x[POINT_Nmax][W_Nmax];
+  int N, np;
 } AmbiPointList;
 
 typedef struct {
@@ -84,41 +84,42 @@ typedef struct {
 } Part;
 
 typedef struct {
-  int n, y, w, p, t, S, Lv, Lp, N, u, d, g, VP, B, T, H, dd, gd, 
-    noconvex, Msum, Sym, V, Rv, Test, Sort, Dir, Proj, f, G;		
+  int n, y, w, p, t, S, Lv, Lp, N, u, d, g, VP, B, T, H, dd, gd, noconvex, Msum,
+      Sym, V, Rv, Test, Sort, Dir, Proj, f, G;
 } Flags;
 
 typedef struct {
-	int noconvex, Sym, Test, Sort;		
+  int noconvex, Sym, Test, Sort;
 } NEF_Flags;
 
 struct Vector {
   Long x[POLY_Dmax];
 };
 
-typedef struct Vector Vector ;
+typedef struct Vector Vector;
 
 typedef struct {
   struct Vector *L;
   int n;
-  Long np, NP_max;						} DYN_PPL;
+  Long np, NP_max;
+} DYN_PPL;
 
-void part_nef(PolyPointList *, VertexNumList *, EqList *, PartList *,
-	      int *, NEF_Flags *);
+void part_nef(PolyPointList *, VertexNumList *, EqList *, PartList *, int *,
+              NEF_Flags *);
 
 void Make_E_Poly(FILE *, CWS *, PolyPointList *, VertexNumList *, EqList *,
-		 int *, Flags *, int *);
+                 int *, Flags *, int *);
 
-void Mink_WPCICY(AmbiPointList * _AP_1, AmbiPointList * _AP_2,
-		 AmbiPointList * _AP);
+void Mink_WPCICY(AmbiPointList *_AP_1, AmbiPointList *_AP_2,
+                 AmbiPointList *_AP);
 
-int  IsDigit(char);
+int IsDigit(char);
 
-int  IntSqrt(int q);
+int IntSqrt(int q);
 
 void Die(char *);
 
 void Print_CWS_Zinfo(CWS *);
 
-void AnalyseGorensteinCone(CWS *_CW,  PolyPointList *_P, VertexNumList *_V, 
-			   EqList *_E, int *_codim, Flags * _F);
+void AnalyseGorensteinCone(CWS *_CW, PolyPointList *_P, VertexNumList *_V,
+                           EqList *_E, int *_codim, Flags *_F);
