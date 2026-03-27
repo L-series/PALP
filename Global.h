@@ -1,10 +1,12 @@
 #include <assert.h>
 #ifdef PALP_FAST_ASSERT
-/* Evaluate assertion expressions (preserving side effects) without aborting.
-   PALP has many assert() calls with side effects (++, --, =, function calls)
-   that break with standard NDEBUG. This macro keeps side effects intact. */
+/* Evaluate assertion expressions (preserving side effects) AND abort on
+   failure — identical to standard assert() but without the NDEBUG hazard.
+   PALP uses assert() both for bounds checks and for calls with side effects
+   (function calls whose return value is also checked); both need to run their
+   expression AND abort if the condition is false. */
 #undef assert
-#define assert(x) ((void)(x))
+#define assert(x) do { if (!(x)) { fputs("PALP assertion failed: " #x "\n", stderr); abort(); } } while(0)
 #endif
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,7 +51,7 @@ be considerably slowed down.
 #define SYM_Nmax 1200
 
 #elif (POLY_Dmax == 5)
-#define POINT_Nmax 200000 /* max number of points      */
+#define POINT_Nmax 2000000 /* 200K was too small; some 5D CWS generate more points */
 #define VERT_Nmax 64      /* max 47 observed; 64 keeps INCI as u64 */
 #define FACE_Nmax 1024    /* max number of faces       */
 #define SYM_Nmax 3840     /* 5-cube symmetry: 2^5*5!   */
