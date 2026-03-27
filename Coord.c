@@ -78,15 +78,38 @@ void Print_EL(EqList *_E, int *n, int suppress_c, const char *comment) {
   }
 }
 
+/* Fast integer-to-string: write decimal to buf, return pointer past last char */
+static char *itoa_fast(char *buf, int v) {
+  char tmp[12];
+  int neg = 0, len = 0;
+  if (v < 0) { neg = 1; v = -v; }
+  do { tmp[len++] = '0' + (v % 10); v /= 10; } while (v);
+  if (neg) *buf++ = '-';
+  while (len--) *buf++ = tmp[len];
+  return buf;
+}
+
 void Print_Matrix(Long Matrix[][VERT_Nmax], int n_lines, int n_columns,
                   const char *comment) {
+  /* Compact single-line output: [[r0c0,r0c1,...],[r1c0,...],...]  */
+  /* Buffer sized for worst case: 12 chars/number, commas, brackets, newline */
+  static char buf[VERT_Nmax * POLY_Dmax * 14 + POLY_Dmax * 4 + 8];
+  char *p = buf;
   int i, j;
-  fprintf(outFILE, "%d %d  %s\n", n_lines, n_columns, comment);
+  (void)comment;
+  *p++ = '[';
   for (i = 0; i < n_lines; i++) {
-    for (j = 0; j < n_columns; j++)
-      fprintf(outFILE, " %3d", (int)Matrix[i][j]);
-    fprintf(outFILE, "\n");
+    if (i) *p++ = ',';
+    *p++ = '[';
+    for (j = 0; j < n_columns; j++) {
+      if (j) *p++ = ',';
+      p = itoa_fast(p, (int)Matrix[i][j]);
+    }
+    *p++ = ']';
   }
+  *p++ = ']';
+  *p++ = '\n';
+  fwrite(buf, 1, (size_t)(p - buf), outFILE);
 }
 int auxString2Int(char *c, int *n) {
   int j = 0;

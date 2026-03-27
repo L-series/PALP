@@ -1,4 +1,11 @@
 #include <assert.h>
+#ifdef PALP_FAST_ASSERT
+/* Evaluate assertion expressions (preserving side effects) without aborting.
+   PALP has many assert() calls with side effects (++, --, =, function calls)
+   that break with standard NDEBUG. This macro keeps side effects intact. */
+#undef assert
+#define assert(x) ((void)(x))
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,12 +48,27 @@ be considerably slowed down.
 #define FACE_Nmax 824  /* max number of faces      */
 #define SYM_Nmax 1200
 
+#elif (POLY_Dmax == 5)
+#define POINT_Nmax 200000 /* max number of points      */
+#define VERT_Nmax 64      /* max 47 observed; 64 keeps INCI as u64 */
+#define FACE_Nmax 1024    /* max number of faces       */
+#define SYM_Nmax 3840     /* 5-cube symmetry: 2^5*5!   */
+#define EQUA_Nmax 64      /* max 59 facets observed    */
+
+#else
+#ifdef PALP_TIGHT_5D
+#define POINT_Nmax 200000 /* tuned for 5d polytopes    */
+#define VERT_Nmax 64      /* max 47 observed; 64 keeps INCI as u64 */
+#define FACE_Nmax 1024    /* max number of faces       */
+#define SYM_Nmax 3840     /* 5-cube symmetry: 2^5*5!   */
+#define EQUA_Nmax 64      /* max 59 facets observed    */
 #else
 #define POINT_Nmax 2000000
 #define VERT_Nmax 64    /* !! use optimal value !!  */
 #define FACE_Nmax 10000 /* max number of faces      */
 #define SYM_Nmax 46080  /* symmetry (P_1)^6: 2^6*6! */
 #define EQUA_Nmax 1280  /* up to 20000 without alloc */
+#endif
 #endif
 
 #ifndef EQUA_Nmax /* default setting */
@@ -406,6 +428,16 @@ Long Eval_Eq_on_V(Equation *E, Long *V, int n);
 /*
 Evaluates E on V, i.e. calculates \sum_{i=0}^{n-1} E->a[i] * V[i] + E->c.
 */
+
+static inline Long Eval_Eq_on_V_Dim5(const Equation *E, const Long *V) {
+  return E->c + V[0]*E->a[0] + V[1]*E->a[1] + V[2]*E->a[2]
+              + V[3]*E->a[3] + V[4]*E->a[4];
+}
+#if POLY_Dmax == 5
+#define EVAL_EQ(E, V, n) Eval_Eq_on_V_Dim5((E), (V))
+#else
+#define EVAL_EQ(E, V, n) Eval_Eq_on_V((E), (V), (n))
+#endif
 
 int Span_Check(EqList *EL, EqList *HL, int *n);
 /*

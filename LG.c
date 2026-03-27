@@ -1,6 +1,6 @@
-#include "LG.h"
 #include "Global.h"
 #include "Rat.h"
+#include "LG.h"
 
 #define SHOW_b01_TWIST (0)
 #define Tout (0)
@@ -1125,7 +1125,7 @@ void Poly_Dif(PoCoLi *A, PoCoLi *B, PoCoLi *D) /* D = A-B */
 void AllocPoCoLi(PoCoLi *P) /* allocate e[A] and c[A] */
 {
   assert(0 < P->A);
-  assert(NULL != (P->e = (int *)malloc(P->A * (sizeof(int) + sizeof(Pint)))));
+  P->e = (int *)malloc(P->A * (sizeof(int) + sizeof(Pint))); assert(NULL != P->e);
   P->c = (Pint *)&P->e[P->A];
   // printf("AllocPoCoLi: P->A = %d\n", P->A);
 }
@@ -1311,7 +1311,7 @@ int Count_b01(Weight *W) {
 /* 	printf("M[%d]=",J);for(i=0;i<J;i++)printf("%d ",M[i]);  	     */
 /* 	printf(" I=");for(i=0;i<J;i++)printf("%d ",I[i]);printf(" j=%d\n",j);*/
 #endif
-      assert(0 < (c--));
+      assert(c > 0); c--;
     } while (Multiloop(M, I, &j, &J));
     assert(c == 0); /* END */
   }
@@ -1372,7 +1372,7 @@ void Fast_c9_VaHo(Weight *W,
           nvar += mask[i];
       }
       woS[nvar]++;
-      assert(0 < (c--));
+      assert(c > 0); c--;
     } while (Multiloop(W->m, I, &j, &ns));
     assert(c == 0); /* END */
   }
@@ -1456,7 +1456,7 @@ int WIndex_HTrace(Weight *W, int *WI, int *T) /* T=sum(Hij), return over=H00 */
           nvar += mask[i];
       }
       woS[nvar]++;
-      assert(0 < (c--));
+      assert(c > 0); c--;
     } while (Multiloop(W->m, I, &j, &ns));
     assert(c == 0); /* END */
   }
@@ -1893,7 +1893,7 @@ void LGO_VaHo(Weight *W, VaHo *V) {
               for (s = 0; s < mm; s++) {
                 Free_PoCoLi(&SO[s]);
               }
-              assert(0 < (b--));
+              assert(b > 0); b--;
             } while (Multiloop(M, L, &u, &J));
             assert(b == 0);
 
@@ -1958,7 +1958,7 @@ void LGO_VaHo(Weight *W, VaHo *V) {
             fputs("\n", outFILE);
           }
         /* if(!cont)exit(0); */
-        assert(0 < (a--));
+        assert(a > 0); a--;
       } while (Multiloop(W->m, I, &v, &J));
       assert(a == 0); /* END gen TWISTS */
     }
@@ -2146,8 +2146,8 @@ void OLDInit_Trans_Check(int *mask, int **targets, int **mighty) {
     mask[i] = 2 * mask[i - 1]; /* mask={1,2,4,8,16,32,...} */
 
   assert(maxPN == mask[W_Nmax]); /* maximum number of pointers at one point */
-  assert(NULL != (*targets = (int *)malloc(maxPN * sizeof(int))));
-  assert(NULL != (*mighty = (int *)malloc(maxPN * sizeof(int))));
+  *targets = (int *)malloc(maxPN * sizeof(int)); assert(NULL != *targets);
+  *mighty = (int *)malloc(maxPN * sizeof(int)); assert(NULL != *mighty);
 
   for (i = 0; i < W_Nmax; i++)
     for (j = mask[i]; j < mask[i + 1]; j++) /* make mighty[] */
@@ -2219,8 +2219,8 @@ void Init_Trans_Check(int *mask, int **targets, int **mighty) {
     mask[i] = 2 * mask[i - 1]; /* mask={1,2,4,8,16,32,...} */
 
   assert(maxPN == mask[W_Nmax]); /* maximum number of pointers at one point */
-  assert(NULL != (*targets = (int *)malloc(maxPN * sizeof(int))));
-  assert(NULL != (*mighty = (int *)malloc(maxPN * sizeof(int))));
+  *targets = (int *)malloc(maxPN * sizeof(int)); assert(NULL != *targets);
+  *mighty = (int *)malloc(maxPN * sizeof(int)); assert(NULL != *mighty);
 
   for (i = 0; i < W_Nmax; i++)
     for (j = mask[i]; j < mask[i + 1]; j++) /* make mighty[] */
