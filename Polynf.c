@@ -929,13 +929,7 @@ int Make_Poly_Sym_NF(PolyPointList *_P, VertexNumList *_V, EqList *_F,
     fprintf(outFILE, "#GL(Z,%d)-Symmetries=%d, #VPM-Symmetries=%d\n", _P->n,
             *SymNum, ns);
   if (N) {
-    char c[VERT_Nmax + 38] = "Normal form of vertices of P";
-    if (*SymNum < SYM_Nmax)
-      if (Perm_String(V_perm[*SymNum], _V->nv, &c[37])) {
-        strcpy(&c[28], "    perm");
-        c[36] = '=';
-      }
-    Print_Matrix(NF, _P->n, _V->nv, c);
+    Print_Matrix(NF, _P->n, _V->nv, "");
   }
   free(CL);
   return ns;
@@ -1306,7 +1300,7 @@ int TriMat_to_Weight(GL_Long T[][POLY_Dmax], int *p, int r, int *s, int *nw,
       for (i = j + 1; i <= r; i++)
         x[i] *= a;
   }
-  assert((*nw)++ < *Wmax);
+  assert(*nw < *Wmax); (*nw)++;
   for (i = 0; i < *p; i++)
     X[i] = 0;
   for (i = 0; i <= r; i++)
@@ -2816,7 +2810,7 @@ void Test_EK3_Fibration(PolyPointList *P, int edim,
                         GL_Long G[POLY_Dmax][POLY_Dmax]) {
   int s[VERT_Nmax], t[VERT_Nmax], d = P->n, p = P->np - 1;
   PolyPointList *A;
-  assert(NULL != (A = (PolyPointList *)malloc(sizeof(PolyPointList))));
+  A = (PolyPointList *)malloc(sizeof(PolyPointList)); assert(NULL != A);
   {
     int i, j, e, k, v, n, f;
     Long PM[VERT_Nmax][POLY_Dmax];
@@ -2893,7 +2887,7 @@ void Print_Elliptic_K3_Fibrations(PolyPointList *P, int edim,
   int x, s[VERT_Nmax], t[VERT_Nmax], d = P->n, p = P->np - 1;
   PolyPointList *A = NULL;
   if (nk)
-    assert(NULL != (A = (PolyPointList *)malloc(sizeof(PolyPointList))));
+    { A = (PolyPointList *)malloc(sizeof(PolyPointList)); assert(NULL != A); }
   for (x = 0; x < nk; x++) {
     int i, j, e, k, v, n, f;
     Long PM[VERT_Nmax][POLY_Dmax];
@@ -3090,7 +3084,7 @@ void Elliptic_K3_Fibration(PolyPointList *P, int nv, int edim) {
             b[i] = F->B[n][i];
           }
           G_2_BxG(ge, b, d, &edim);
-          assert(++nk < VERT_Nmax);
+          nk++; assert(nk < VERT_Nmax);
           /* 	printf("\nTest_EK3: e=%d nf=%d  n=%d nb=%d\n",e,F->nf,n,nb);
                   Test_EK3_Fibration(P,edim,F->GK[nk-1]); */
         }
@@ -3811,7 +3805,7 @@ int GL_Lattice_Basis(int d, int p, Long *P[POLY_Dmax], /* return index */
           V[L] = Egcd(g, a, &vg, &va);
           for (l = L + 1; l < d; l++)
             V[l] = va * GxP(G[l], P[C], &d);
-          assert(0 == g % (vg = GL_V_to_GLZ(&V[L], B, d - L)));
+          vg = GL_V_to_GLZ(&V[L], B, d - L); assert(0 == g % vg);
           g = vg;
           c = C;
           C = 0;
@@ -4315,7 +4309,7 @@ int GL_Lattice_Basis_QZ(int d, int p, Long *P[VERT_Nmax], Long *D, /* index */
           }
           for (l = L + 1; l < d; l++)
             V[l] = va * GxP(G[l], P[C], &d);
-          assert(0 == g % (vg = GL_V_to_GLZ(&V[L], B, d - L)));
+          vg = GL_V_to_GLZ(&V[L], B, d - L); assert(0 == g % vg);
           g = vg;
           c = C;
           C = 0;
@@ -4366,7 +4360,7 @@ int GL_Lattice_Basis_QZ(int d, int p, Long *P[VERT_Nmax], Long *D, /* index */
     Y = Z[L];
     C = 0;
     while (!GP[C][L])
-      assert(C++ < p);
+      { assert(C < p); C++; }
     g = GP[C][L];
     for (c = 0; c < p; c++)
       A[c] = 0;
@@ -5219,7 +5213,7 @@ int Fano5d(PolyPointList *P, VertexNumList *V, EqList *E) {
         } /* circuits with abs(C[])>1 */
         else
           CC[nc][np] = 1;
-        assert(++nc < FPcirNmax);
+        nc++; assert(nc < FPcirNmax);
       }
       /* for(i=0;i<=d;i++)printf("%d ",p[i]); printf(" =>  ");
          for(i=0;i<=d;i++)printf("%ld ",C[i]); puts(" [circuit]"); */

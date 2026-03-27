@@ -128,7 +128,7 @@ INCI Eq_To_INCI(Equation *_Eq, PolyPointList *_P, VertexNumList *_V) {
   int j;
   INCI X = INCI_0();
   for (j = 0; j < _V->nv; j++)
-    X = INCI_PN(X, Eval_Eq_on_V(_Eq, _P->x[_V->v[j]], _P->n));
+    X = INCI_PN(X, EVAL_EQ(_Eq, _P->x[_V->v[j]], _P->n));
   return X;
 }
 
@@ -284,7 +284,7 @@ void Make_VEPM(PolyPointList *_P, VertexNumList *_V, EqList *_E, PairMat PM) {
   int i, j;
   for (i = 0; i < _E->ne; i++)
     for (j = 0; j < _V->nv; j++)
-      PM[i][j] = Eval_Eq_on_V(&_E->e[i], _P->x[_V->v[j]], _P->n);
+      PM[i][j] = EVAL_EQ(&_E->e[i], _P->x[_V->v[j]], _P->n);
 }
 
 int Transpose_PM(PairMat PM, PairMat DPM, int nv, int ne) {
@@ -318,8 +318,8 @@ Equation EEV_To_Equation(Equation *_E1, Equation *_E2, Long *_V, int n) {
   int i;
   Long l, m, g;
   Equation Eq;
-  l = Eval_Eq_on_V(_E2, _V, n);
-  m = Eval_Eq_on_V(_E1, _V, n);
+  l = EVAL_EQ(_E2, _V, n);
+  m = EVAL_EQ(_E1, _V, n);
   g = NNgcd(l, m);
   assert(g);
   l /= g;
@@ -466,7 +466,7 @@ int Span_Check(EqList *_F, EqList *H, int *n) {
 int IsGoodCEq(Equation *_E, PolyPointList *_P, VertexNumList *_V) {
   int i = _V->nv;
   Long s;
-  while (!(s = Eval_Eq_on_V(_E, _P->x[_V->v[--i]], _P->n)))
+  while (!(s = EVAL_EQ(_E, _P->x[_V->v[--i]], _P->n)))
     ;
   if (s < 0) {
     int j = _P->n;
@@ -475,16 +475,16 @@ int IsGoodCEq(Equation *_E, PolyPointList *_P, VertexNumList *_V) {
     _E->c = -_E->c;
   }
   while (i)
-    if (Eval_Eq_on_V(_E, _P->x[_V->v[--i]], _P->n) < 0)
+    if (EVAL_EQ(_E, _P->x[_V->v[--i]], _P->n) < 0)
       return 0;
   return 1;
 }
 
 int Search_New_Vertex(Equation *_E, PolyPointList *_P) {
   int i, v = 0;
-  Long *X = _P->x[0], x = Eval_Eq_on_V(_E, X, (_P->n));
+  Long *X = _P->x[0], x = EVAL_EQ(_E, X, _P->n);
   for (i = 1; i < _P->np; i++) {
-    Long *Y = _P->x[i], y = Eval_Eq_on_V(_E, Y, (_P->n));
+    Long *Y = _P->x[i], y = EVAL_EQ(_E, Y, _P->n);
     if (y > x)
       continue;
     if (y == x)
@@ -631,14 +631,14 @@ int New_Start_Vertex(Long *V0, Long *Ea, PolyPointList *P, int *v) /* P.x[v] */
   for (i = 0; i < P->n; i++)
     E.a[i] = Ea[i];
   E.c = 0;
-  E.c = -Eval_Eq_on_V(&E, V0, P->n);
-  d = Eval_Eq_on_V(&E, P->x[0], P->n);
+  E.c = -EVAL_EQ(&E, V0, P->n);
+  d = EVAL_EQ(&E, P->x[0], P->n);
   if (d > 0)
     dp = d;
   if (d < 0)
     dn = d;
   for (i = 1; i < P->np; i++) {
-    d = Eval_Eq_on_V(&E, P->x[i], P->n);
+    d = EVAL_EQ(&E, P->x[i], P->n);
     if (d == 0)
       continue;
     if (d == dp)
@@ -753,7 +753,7 @@ int GLZ_Start_Simplex(PolyPointList *_P, VertexNumList *_V, CEqList *_C) {
       E->c = 0;
       for (i = 0; i < *d; i++)
         E->a[i] = Z[i];
-      E->c = -Eval_Eq_on_V(E, X, _P->n);
+      E->c = -EVAL_EQ(E, X, _P->n);
     }
     return _C->ne = r;
   } else {
@@ -763,8 +763,8 @@ int GLZ_Start_Simplex(PolyPointList *_P, VertexNumList *_V, CEqList *_C) {
     _C->ne = 2;
     for (i = 0; i < *d; i++)
       E->a[i] = Z[i];
-    E->c = -Eval_Eq_on_V(E, X, _P->n);
-    if (Eval_Eq_on_V(E, _P->x[_V->v[*d]], _P->n) < 0) {
+    E->c = -EVAL_EQ(E, X, _P->n);
+    if (EVAL_EQ(E, _P->x[_V->v[*d]], _P->n) < 0) {
       for (i = 0; i < *d; i++)
         E->a[i] = -Z[i];
       E->c *= -1;
@@ -781,8 +781,8 @@ int GLZ_Start_Simplex(PolyPointList *_P, VertexNumList *_V, CEqList *_C) {
     E->c = 0;
     for (i = 0; i < *d; i++)
       E->a[i] = Z[i];
-    E->c = -Eval_Eq_on_V(E, X, _P->n);
-    XX = Eval_Eq_on_V(E, _P->x[_V->v[*d - 1]], _P->n);
+    E->c = -EVAL_EQ(E, X, _P->n);
+    XX = EVAL_EQ(E, _P->x[_V->v[*d - 1]], _P->n);
     assert(XX);
     if (XX < 0) {
       for (i = 0; i < *d; i++)
@@ -802,8 +802,8 @@ int GLZ_Start_Simplex(PolyPointList *_P, VertexNumList *_V, CEqList *_C) {
       E->c = 0;
       for (i = 0; i < *d; i++)
         E->a[i] = Z[i];
-      E->c = -Eval_Eq_on_V(E, X, _P->n);
-      XX = Eval_Eq_on_V(E, _P->x[_V->v[x]], _P->n);
+      E->c = -EVAL_EQ(E, X, _P->n);
+      XX = EVAL_EQ(E, _P->x[_V->v[x]], _P->n);
       assert(XX);
       if (XX < 0) {
         for (i = 0; i < *d; i++)
@@ -816,7 +816,7 @@ int GLZ_Start_Simplex(PolyPointList *_P, VertexNumList *_V, CEqList *_C) {
   for (x = 0; x < _C->ne; x++)
     for (i = 0; i <= *d; i++)
       assert((x == i) ==
-             (0 != Eval_Eq_on_V(&_C->e[x], _P->x[_V->v[*d - i]], _P->n)));
+             (0 != EVAL_EQ(&_C->e[x], _P->x[_V->v[*d - i]], _P->n)));
   return 0;
 }
 
@@ -829,8 +829,16 @@ int GLZ_Start_Simplex(PolyPointList *_P, VertexNumList *_V, CEqList *_C) {
 void Make_New_CEqs(PolyPointList *_P, VertexNumList *_V, CEqList *_C,
                    EqList *_F, INCI *CEq_I, INCI *F_I) {
   int i, j, Old_C_ne = _C->ne;
+#ifdef PALP_THREADSAFE
+  /* Thread-local scratch space — avoids data races when called from
+     multiple threads simultaneously.  These buffers are only used as
+     temporaries inside this function. */
+  static __thread CEqList Bad_C;
+  static __thread INCI Bad_C_I[CEQ_Nmax];
+#else
   static CEqList Bad_C;
   static INCI Bad_C_I[CEQ_Nmax];
+#endif
 
 #if (SHOW_NEW_CEq)
   static int init;
@@ -847,7 +855,7 @@ void Make_New_CEqs(PolyPointList *_P, VertexNumList *_V, CEqList *_C,
 
   Bad_C.ne = _C->ne = 0;
   for (i = 0; i < Old_C_ne; i++) {
-    Long dist = Eval_Eq_on_V(&_C->e[i], _P->x[_V->v[_V->nv - 1]], _P->n);
+    Long dist = EVAL_EQ(&_C->e[i], _P->x[_V->v[_V->nv - 1]], _P->n);
     CEq_I[i] = INCI_PN(CEq_I[i], dist);
     if (dist < 0) {
       Bad_C.e[Bad_C.ne] = _C->e[i];
@@ -866,7 +874,7 @@ void Make_New_CEqs(PolyPointList *_P, VertexNumList *_V, CEqList *_C,
   Old_C_ne = _C->ne;
   for (i = 0; i < _F->ne; i++)
     F_I[i] = INCI_PN(F_I[i],
-                     Eval_Eq_on_V(&_F->e[i], _P->x[_V->v[_V->nv - 1]], _P->n));
+                     EVAL_EQ(&_F->e[i], _P->x[_V->v[_V->nv - 1]], _P->n));
   for (j = 0; j < _F->ne; j++)
     if (!INCI_M2(F_I[j]))
       for (i = 0; i < Bad_C.ne; i++) {
@@ -895,7 +903,7 @@ void Make_New_CEqs(PolyPointList *_P, VertexNumList *_V, CEqList *_C,
         CEq_I[_C->ne] = INCI_PN(INCI_D2(New_Face), 0);
         _C->e[_C->ne] = EEV_To_Equation(&(Bad_C.e[i]), &(_F->e[j]),
                                         _P->x[_V->v[_V->nv - 1]], _P->n);
-        assert(IsGoodCEq(&(_C->e[_C->ne++]), _P, _V));
+        { int _ok = IsGoodCEq(&(_C->e[_C->ne]), _P, _V); _C->ne++; assert(_ok); }
       }
   for (j = 0; j < Old_C_ne; j++)
     if (!INCI_M2(CEq_I[j]))
@@ -925,7 +933,7 @@ void Make_New_CEqs(PolyPointList *_P, VertexNumList *_V, CEqList *_C,
         CEq_I[_C->ne] = INCI_PN(INCI_D2(New_Face), 0);
         _C->e[_C->ne] = EEV_To_Equation(&(Bad_C.e[i]), &(_C->e[j]),
                                         _P->x[_V->v[_V->nv - 1]], _P->n);
-        assert(IsGoodCEq(&(_C->e[_C->ne++]), _P, _V));
+        { int _ok = IsGoodCEq(&(_C->e[_C->ne]), _P, _V); _C->ne++; assert(_ok); }
       }
 
 #if (SHOW_NEW_CEq)
@@ -953,7 +961,7 @@ int IP_Search_Bad_Eq(CEqList *_C, EqList *_F, INCI *CEq_I, INCI *F_I,
       if (INCI_lex_GT(&CEq_I[j], &CEq_I[M]))
         M = j;
     for (j = 0; j < _P->np; j++)
-      if (Eval_Eq_on_V(&(_C->e[M]), _P->x[j], _P->n) < 0) {
+      if (EVAL_EQ(&(_C->e[M]), _P->x[j], _P->n) < 0) {
         INCI AI = CEq_I[M];
         Equation AE = _C->e[M];
         CEq_I[M] = CEq_I[_C->ne];
@@ -986,7 +994,7 @@ int FE_Search_Bad_Eq(CEqList *_C, EqList *_F, INCI *CEq_I, INCI *F_I,
       if (INCI_lex_GT(&CEq_I[j], &CEq_I[M]))
         M = j;
     for (j = 0; j < _P->np; j++)
-      if (Eval_Eq_on_V(&(_C->e[M]), _P->x[j], _P->n) < 0) {
+      if (EVAL_EQ(&(_C->e[M]), _P->x[j], _P->n) < 0) {
         INCI AI = CEq_I[M];
         Equation AE = _C->e[M];
         CEq_I[M] = CEq_I[_C->ne];
@@ -1016,7 +1024,7 @@ int IP_Search_Bad_Eq(CEqList *_C, EqList *_F, INCI *CEq_I, INCI *F_I,
   while (_C->ne--) {
     int j;
     for (j = 0; j < _P->np; j++)
-      if (Eval_Eq_on_V(&(_C->e[_C->ne]), _P->x[j], _P->n) < 0)
+      if (EVAL_EQ(&(_C->e[_C->ne]), _P->x[j], _P->n) < 0)
         return ++_C->ne;
     if (_C->e[_C->ne].c < 1) {
       *_IP = 0;
@@ -1034,7 +1042,7 @@ int FE_Search_Bad_Eq(CEqList *_C, EqList *_F, INCI *CEq_I, INCI *F_I,
   while (_C->ne--) {
     int j;
     for (j = 0; j < _P->np; j++)
-      if (Eval_Eq_on_V(&(_C->e[_C->ne]), _P->x[j], _P->n) < 0)
+      if (EVAL_EQ(&(_C->e[_C->ne]), _P->x[j], _P->n) < 0)
         return ++_C->ne;
     if (_C->e[_C->ne].c < 1)
       *_IP = 0;
@@ -1053,7 +1061,7 @@ int REF_Search_Bad_Eq(CEqList *_C, EqList *_F, INCI *CEq_I, INCI *F_I,
   while (_C->ne--) {
     int j;
     for (j = 0; j < _P->np; j++)
-      if (Eval_Eq_on_V(&(_C->e[_C->ne]), _P->x[j], _P->n) < 0)
+      if (EVAL_EQ(&(_C->e[_C->ne]), _P->x[j], _P->n) < 0)
         return ++_C->ne;
     if (_C->e[_C->ne].c != 1) {
       *_REF = 0;
@@ -1225,7 +1233,7 @@ void add_for_completion(Long *yDen, Long Den, EqList *_E, PolyPointList *_CP,
     for (i = 0; i < n; i++)
       yold[i] = yDen[i];
   for (i = 0; i < _E->ne; i++)
-    if (Eval_Eq_on_V(&(_E->e[i]), yold, n) < 0)
+    if (EVAL_EQ(&(_E->e[i]), yold, n) < 0)
       return;
   for (i = 0; i < *old_np; i++)
     if (Vec_Equal(_CP->x[i], yold, n))
@@ -1417,7 +1425,7 @@ void Make_FaceIPs(PolyPointList *_P, VertexNumList *_V, EqList *_E,
   for (k = 0; k < _P->np; k++) {
     x = INCI_0();
     for (i = 0; i < _E->ne; i++)
-      x = INCI_PN(x, Eval_Eq_on_V(&(_E->e[i]), _P->x[k], _P->n));
+      x = INCI_PN(x, EVAL_EQ(&(_E->e[i]), _P->x[k], _P->n));
     RaiseNip(x, _I, _P->n);
   }
   for (k = 0; k < _DP->np; k++) {
@@ -1499,7 +1507,7 @@ void Qadd_for_completion(Long *yDen, Long Den, int n, int *np, EqList *_E,
   for (i = 0; i < n; i++)
     y[i] = yDen[i] / Den;
   for (i = 0; i < _E->ne; i++)
-    x = INCI_PN(x, Eval_Eq_on_V(&(_E->e[i]), y, n));
+    x = INCI_PN(x, EVAL_EQ(&(_E->e[i]), y, n));
   RaiseDip(x, _I, n, 1);
   (*np)++;
 }
@@ -1543,7 +1551,7 @@ void lastline(Long *EyD, Long *yDen, Long Den, EqList *_E, int n, int *np,
     y[i] = yDen[i] + InvMat[i][n - 1] * lmin;
   xmin = INCI_0();
   for (i = 0; i < _E->ne; i++)
-    xmin = INCI_PN(xmin, Eval_Eq_on_V(&(_E->e[i]), y, n));
+    xmin = INCI_PN(xmin, EVAL_EQ(&(_E->e[i]), y, n));
   RaiseDip(xmin, _I, n, 1);
   (*np)++;
   if (lmax == lmin)
@@ -1552,7 +1560,7 @@ void lastline(Long *EyD, Long *yDen, Long Den, EqList *_E, int n, int *np,
     y[i] = yDen[i] + InvMat[i][n - 1] * lmax;
   xmax = INCI_0();
   for (i = 0; i < _E->ne; i++)
-    xmax = INCI_PN(xmax, Eval_Eq_on_V(&(_E->e[i]), y, n));
+    xmax = INCI_PN(xmax, EVAL_EQ(&(_E->e[i]), y, n));
   RaiseDip(xmax, _I, n, 1);
   (*np)++;
   if (lmax == lmin + 1)
@@ -1665,7 +1673,7 @@ void Compute_nip(PolyPointList *_P, EqList *_E, FaceInfo *_I) {
   for (k = 0; k < _P->np; k++) {
     x = INCI_0();
     for (i = 0; i < _E->ne; i++)
-      x = INCI_PN(x, Eval_Eq_on_V(&(_E->e[i]), _P->x[k], _P->n));
+      x = INCI_PN(x, EVAL_EQ(&(_E->e[i]), _P->x[k], _P->n));
     RaiseNip(x, _I, _P->n);
   }
 }
