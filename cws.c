@@ -16,7 +16,27 @@ typedef struct {
   int nu;
 } CWS_type;
 
-#define OSL (25) /* opt_string's length */
+#define DIM5_MAX_ARITY 5
+#define DIM5_MAX_SIMPLEX_SIZE 5
+
+typedef struct {
+  int id;
+  int ambient_vertices;
+  int simplex_count;
+  int simplex_sizes[DIM5_MAX_ARITY];
+  int shared_counts[DIM5_MAX_ARITY];
+  int mappings[DIM5_MAX_ARITY][DIM5_MAX_SIMPLEX_SIZE];
+} Dim5StructureDescriptor;
+
+typedef struct {
+  const Dim5StructureDescriptor *descriptor;
+  FILE *inputs[NFmax];
+  int family_groups[NFmax];
+  Weight weights[NFmax];
+  long indices[NFmax];
+} Dim5EnumerationContext;
+
+#define OSL (28) /* opt_string's length */
 
 void PrintCWSUsage(char *c) {
   int i;
@@ -36,9 +56,12 @@ void PrintCWSUsage(char *c) {
       "polytopes.",
       "                   For #<=4 all relevant combinations are made by "
       "default,",
-      "                   otherwise the following option is required:",
+      "                   for #=5 the builtin canonical dim-5 structures are",
+      "                   available, optionally restricted by -s#.",
+      "                   Otherwise the following option is required:",
       "             -n[#] followed by the names wf_1 ... wf_# of weight files",
-      "                   currently #=2,3 are implemented.",
+      "                   legacy typed input supports #=2,3; dim-5 generic",
+      "                   structures use -s# with #=2..47.",
       "              [-t] followed by # numbers n_i specifies the CWS-type, "
       "i.e.",
       "                   the numbers n_i of weights to be selected from wf_i.",
@@ -89,6 +112,7 @@ void SimplexPointCount(int narg, char *fn[]);
 void Init_IP_Weights(int narg, char *fn[]);
 void Init_moon_Weights(int narg, char *fn[]);
 void Init_IP_CWS(int narg, char *fn[]);
+void Make_5_CWS(int structure_id);
 void IP_Poly_Data(int narg, char *fn[]);
 void Make_CWS_Points(CWS *, PolyPointList *);
 void Npoly2cws(int narg, char *fn[]);
@@ -606,7 +630,7 @@ void AddHalf(void) {
 
 void Make_IP_Weights(int d, int Dmin, int Dmax, int rFlag, int tFlag);
 void MakeMoonWeights(int d, int Dmin, int Dmax);
-void Make_34_Weights(int d, int tFlag);
+void Make_34_Weights(int d, int tFlag, int print_summary);
 void Init_IP_Weights(int narg, char *fn[]) {
   int n = 1, d, L = 0, H = 0, rf = 0, tf = 0;
   char *c = &fn[1][2];
@@ -653,7 +677,7 @@ void Init_IP_Weights(int narg, char *fn[]) {
   if (H)
     Make_IP_Weights(d, L, H, rf, tf);
   else
-    Make_34_Weights(d, tf);
+    Make_34_Weights(d, tf, 1);
   {
     ;
   }
@@ -753,7 +777,7 @@ void Npoly2cws(int narg, char *fn[]) {
 void Make_IP_CWS(int narg, char *fn[]);
 void Make_34_CWS(int d);
 void Init_IP_CWS(int narg, char *fn[]) {
-  int d, n = 1, nop = 0;
+  int d, n = 1, nop = 0, structure_id = 0;
   char *c = &fn[1][2];
   if (narg > 2)
     if (c[0] == 0)
@@ -766,15 +790,32 @@ void Init_IP_CWS(int narg, char *fn[]) {
     printf("Increase POLY_Dmax to %d\n", d);
     exit(0);
   }
-  if (++n < narg)
-    if ((fn[n][0] == '-') && (fn[n][1] == 'n'))
+  while (++n < narg) {
+    if ((fn[n][0] == '-') && (fn[n][1] == 'n')) {
       nop = 1;
+      break;
+    }
+    if ((fn[n][0] == '-') && (fn[n][1] == 's')) {
+      if ((fn[n][2] == 0) && (narg > n + 1))
+        c = fn[++n];
+      else
+        c = &fn[n][2];
+      if (!IsDigit(c[0]))
+        Die("after -s there must be a digit!");
+      structure_id = atoi(c);
+    } else
+      Die("illegal option after -c#");
+  }
   if (nop)
     Make_IP_CWS(narg, fn);
-  else if (d <= 4)
+  else if (d <= 4) {
+    if (structure_id)
+      Die("-s# is only implemented for -c5");
     Make_34_CWS(d);
+  } else if (d == 5)
+    Make_5_CWS(structure_id);
   else
-    Die("`-c#' has to be followed by `-n' and the weight file names for dim>4");
+    Die("`-c#' has to be followed by `-n' and the weight file names for dim>5");
 }
 
 /*  ==========             ALL  IP  WEIGHTS  in  d <= 4     	==========  */
@@ -1025,7 +1066,7 @@ void makesubsets(WSaux *X) {
     }
 }
 void WRITE_Weight(Weight *_W);
-void Make_34_Weights(int d, int tFlag) {
+void Make_34_Weights(int d, int tFlag, int print_summary) {
   int i, Info = 0;
   WSaux *X = (WSaux *)malloc(sizeof(WSaux));
   PolyPointList *P = (PolyPointList *)malloc(sizeof(PolyPointList));
@@ -1121,14 +1162,23 @@ void Make_34_Weights(int d, int tFlag) {
       char c[5] = "  rt";
       if (t || !tFlag) {
         c[3] = (t) ? 't' : 0;
-        if (Info++)
-          puts("");
-        WRITE_Weight(&W);
-        printf("%s", c);
+        if (print_summary) {
+          if (Info++)
+            fprintf(outFILE, "\n");
+          WRITE_Weight(&W);
+          fprintf(outFILE, "%s", c);
+        } else {
+          Info++;
+          WRITE_Weight(&W);
+          fprintf(outFILE, "%s\n", c);
+        }
       }
     }
   }
-  fprintf(outFILE, "  #=%d  #cand=%d\n", Info, X->wnum);
+  if (print_summary) {
+    fprintf(outFILE, "  #=%d  #cand=%d\n", Info, X->wnum);
+  }
+  free(P);
   free(X);
 }
 /*  ==========       End of  ALL  IP  WEIGHTS  in  d <= 4    	==========  */
@@ -1637,6 +1687,8 @@ const wei4 W4[95] = {
     {44, {4, 5, 13, 22}}, {48, {3, 5, 16, 24}}, {50, {7, 8, 10, 25}},
     {54, {4, 5, 18, 27}}, {66, {5, 6, 22, 33}}};
 
+  #include "dim5_structures.inc"
+
 void MakeSelections(FILE *, FILE *, int);
 void Make2CWS(FILE *, FILE *, int, int);
 void RW_TO_CWS(CWS *, Weight *, int, int, int, int);
@@ -1644,6 +1696,8 @@ void W_TO_CWS(CWS *, Weight *, int, int, int, int);
 void PRINT_CWS(CWS *);
 void Make_111_CWS(FILE **, int *);
 void Make_nno_CWS(FILE **, int, int);
+  void MakeDim5DescriptorCWS(const Dim5StructureDescriptor *descriptor,
+                 FILE *AUXFILE[], int family_groups[]);
 
 void STtmp(FILE *w2FILE, FILE *w3FILE, FILE *w4FILE) {
   int i, j;
@@ -2382,9 +2436,201 @@ void MakeSelections(FILE *INFILE, FILE *AUXFILE, int u) {
   rewind(INFILE);
 }
 
+static const Dim5StructureDescriptor *
+FindDim5StructureDescriptor(int structure_id) {
+  int i;
+
+  for (i = 0; i < (int)(sizeof(kDim5Structures) / sizeof(kDim5Structures[0]));
+       i++)
+    if (kDim5Structures[i].id == structure_id)
+      return &kDim5Structures[i];
+  return NULL;
+}
+
+static void EmbedWeightInCWS(CWS *CW, const Weight *W, int ambient_vertices,
+                             const int mapping[DIM5_MAX_SIMPLEX_SIZE]) {
+  int i;
+
+  CW->d[CW->nw] = W->d;
+  CW->N = ambient_vertices;
+  for (i = 0; i < ambient_vertices; i++)
+    CW->W[CW->nw][i] = 0;
+  for (i = 0; i < W->N; i++) {
+    int coordinate = mapping[i] - 1;
+    assert((coordinate >= 0) && (coordinate < ambient_vertices));
+    CW->W[CW->nw][coordinate] = W->w[i];
+  }
+  CW->nw++;
+  CW->nz = 0;
+}
+
+static void EmitDim5DescriptorCWS(Dim5EnumerationContext *context) {
+  CWS CW;
+  int i;
+
+  CW.nw = 0;
+  CW.nz = 0;
+  for (i = 0; i < context->descriptor->simplex_count; i++)
+    EmbedWeightInCWS(&CW, &context->weights[i],
+                     context->descriptor->ambient_vertices,
+                     context->descriptor->mappings[i]);
+  PRINT_CWS(&CW);
+}
+
+static __attribute__((noinline)) void
+EnumerateDim5Permutations(Dim5EnumerationContext *context, int slot) {
+  int shared_count, index;
+  Long prefix[DIM5_MAX_SIMPLEX_SIZE];
+  Long original_prefix[DIM5_MAX_SIMPLEX_SIZE];
+
+  if (slot >= context->descriptor->simplex_count) {
+    EmitDim5DescriptorCWS(context);
+    return;
+  }
+
+  shared_count = context->descriptor->shared_counts[slot];
+  if (shared_count < 2) {
+    EnumerateDim5Permutations(context, slot + 1);
+    return;
+  }
+
+  for (index = 0; index < shared_count; index++) {
+    prefix[index] = context->weights[slot].w[index];
+    original_prefix[index] = context->weights[slot].w[index];
+  }
+
+  do {
+    for (index = 0; index < shared_count; index++)
+      context->weights[slot].w[index] = prefix[index];
+    EnumerateDim5Permutations(context, slot + 1);
+  } while (NextPrefixPermutation(prefix, shared_count));
+
+  for (index = 0; index < shared_count; index++)
+    context->weights[slot].w[index] = original_prefix[index];
+}
+
+static int Dim5SelectionOrderIsCanonical(const Dim5EnumerationContext *context,
+                                         int slot) {
+  int i;
+
+  for (i = 0; i < slot; i++)
+    if ((context->family_groups[i] == context->family_groups[slot]) &&
+        (context->indices[i] > context->indices[slot]))
+      return 0;
+  return 1;
+}
+
+static __attribute__((noinline)) void EnumerateDim5Weights(
+    Dim5EnumerationContext *context, int slot) {
+  long index = 0;
+
+  if (slot >= context->descriptor->simplex_count)
+    return;
+
+  while (READ_Weight(&context->weights[slot], context->inputs[slot])) {
+    index++;
+    context->indices[slot] = index;
+    if (Dim5SelectionOrderIsCanonical(context, slot)) {
+      if (slot + 1 == context->descriptor->simplex_count)
+        EnumerateDim5Permutations(context, 0);
+      else
+        EnumerateDim5Weights(context, slot + 1);
+    }
+  }
+  context->indices[slot] = 0;
+  rewind(context->inputs[slot]);
+}
+
+void MakeDim5DescriptorCWS(const Dim5StructureDescriptor *descriptor,
+                           FILE *AUXFILE[], int family_groups[]) {
+  Dim5EnumerationContext context;
+  int i;
+
+  context.descriptor = descriptor;
+  for (i = 0; i < DIM5_MAX_ARITY; i++) {
+    context.inputs[i] = AUXFILE[i];
+    context.family_groups[i] = family_groups[i];
+    context.indices[i] = 0;
+  }
+  EnumerateDim5Weights(&context, 0);
+}
+
+static void BuildDim5BuiltinFiles(FILE *weight_files[], int need_five_weights) {
+  FILE *saved_outFILE = outFILE;
+  int i;
+
+  for (i = 0; i <= DIM5_MAX_SIMPLEX_SIZE; i++)
+    weight_files[i] = NULL;
+
+  if ((weight_files[2] = tmpfile()) == NULL)
+    Die("Unable to open tmpfile for read/write");
+  if ((weight_files[3] = tmpfile()) == NULL)
+    Die("Unable to open tmpfile for read/write");
+  if ((weight_files[4] = tmpfile()) == NULL)
+    Die("Unable to open tmpfile for read/write");
+  STtmp(weight_files[2], weight_files[3], weight_files[4]);
+
+  if (need_five_weights) {
+    if ((weight_files[5] = tmpfile()) == NULL)
+      Die("Unable to open tmpfile for read/write");
+    outFILE = weight_files[5];
+    Make_34_Weights(4, 0, 0);
+    outFILE = saved_outFILE;
+    rewind(weight_files[5]);
+  }
+}
+
+void Make_5_CWS(int structure_id) {
+  FILE *weight_files[DIM5_MAX_SIMPLEX_SIZE + 1];
+  FILE *AUXFILE[DIM5_MAX_ARITY] = {NULL};
+  int family_groups[DIM5_MAX_ARITY] = {0};
+  int need_five_weights = 0, matched = 0, i, j;
+
+  for (i = 0; i < (int)(sizeof(kDim5Structures) / sizeof(kDim5Structures[0])); i++) {
+    const Dim5StructureDescriptor *descriptor = &kDim5Structures[i];
+    if (structure_id && (descriptor->id != structure_id))
+      continue;
+    matched = 1;
+    for (j = 0; j < descriptor->simplex_count; j++)
+      if (descriptor->simplex_sizes[j] == 5)
+        need_five_weights = 1;
+  }
+  if (!matched)
+    Die("unknown canonical dim-5 structure id");
+
+  BuildDim5BuiltinFiles(weight_files, need_five_weights);
+
+  for (i = 0; i < (int)(sizeof(kDim5Structures) / sizeof(kDim5Structures[0])); i++) {
+    const Dim5StructureDescriptor *descriptor = &kDim5Structures[i];
+    if (structure_id && (descriptor->id != structure_id))
+      continue;
+
+    for (j = 0; j < descriptor->simplex_count; j++) {
+      if ((AUXFILE[j] = tmpfile()) == NULL)
+        Die("Unable to open tmpfile to read/write");
+      MakeSelections(weight_files[descriptor->simplex_sizes[j]], AUXFILE[j],
+                     descriptor->shared_counts[j]);
+      family_groups[j] = descriptor->simplex_sizes[j];
+    }
+
+    MakeDim5DescriptorCWS(descriptor, AUXFILE, family_groups);
+
+    for (j = 0; j < descriptor->simplex_count; j++) {
+      fclose(AUXFILE[j]);
+      AUXFILE[j] = NULL;
+    }
+  }
+
+  for (i = 2; i <= DIM5_MAX_SIMPLEX_SIZE; i++)
+    if (weight_files[i] != NULL)
+      fclose(weight_files[i]);
+}
+
 void PrintCWSTypes(void) {
   const char B[] = "         ";
   printf("\nThe following types are available:\n\n");
+  printf("#builtin dim-5 structures:\n");
+  printf("%s-c5 [-s structure_id]\n", B);
   printf("#infiles = 2 (need no -t option):\n");
   printf("%s-c# -n2 [intile1] [infile2] (-t k k)\n", B);
   printf("#infiles = 3:\n");
@@ -2393,13 +2639,17 @@ void PrintCWSTypes(void) {
   printf("%s-c# -n3 [intile1] [infile2] [infile3] -t 2 1 1\n", B);
   printf("%s-c# -n3 [intile1] [infile2] [infile3] -t 2 2 1\n", B);
   printf("%s-c# -n3 [intile1] [infile2] [infile3] -t 2 2 2\n", B);
+  printf("#generic dim-5 structures with explicit weight files:\n");
+  printf("%s-c5 -n# wf_1 ... wf_# -s structure_id\n", B);
   exit(0);
 }
 
 void Make_IP_CWS(int narg, char *fn[]) {
   FILE *INFILE[NFmax] = {NULL}, *AUXFILE[NFmax] = {NULL};
   char *infile[NFmax] = {NULL}, *outfile = NULL, *a;
-  int n = 0, d = 0, u = -1, nF = 0, i, D[NFmax];
+  int n = 0, d = 0, u = -1, nF = 0, i, j, D[NFmax], structure_id = 0,
+      family_groups[NFmax] = {0};
+  const Dim5StructureDescriptor *descriptor = NULL;
   CWS_type t;
 
   t.nu = 0;
@@ -2445,8 +2695,13 @@ void Make_IP_CWS(int narg, char *fn[]) {
   n--;
   t.nu = 0;
   while (narg > ++n) {
-    if (fn[n][0] != '-')
-      break;
+    if (fn[n][0] != '-') {
+      if (outfile == NULL)
+        outfile = fn[n];
+      else
+        Die("too many output files!");
+      continue;
+    }
     if (fn[n][1] == 't') {
       if ((fn[n][2] == 0) && (narg > n + 1))
         a = fn[++n];
@@ -2469,9 +2724,16 @@ void Make_IP_CWS(int narg, char *fn[]) {
         t.nu++;
       }
       n--;
-      if (narg > ++n)
-        outfile = fn[n];
-    }
+    } else if (fn[n][1] == 's') {
+      if ((fn[n][2] == 0) && (narg > n + 1))
+        a = fn[++n];
+      else
+        a = &fn[n][2];
+      if (!IsDigit(*a))
+        Die("after -s there must be a digit!");
+      structure_id = atoi(a);
+    } else
+      Die("illegal option in -c# invocation");
   }
   if (nF == 0)
     Die("there is no -n#infiles!");
@@ -2479,6 +2741,8 @@ void Make_IP_CWS(int narg, char *fn[]) {
     Die("No dimensoin specified!");
   if (t.nu && (t.nu != nF))
     Die("if input is -nN -t k_1,...,k_n then N must be equal to n!");
+  if (structure_id && t.nu)
+    Die("choose either -s# or -t TYPE... for combined weight systems");
   if (outfile == NULL)
     outFILE = stdout;
   else if ((outFILE = fopen(outfile, "w")) == NULL) {
@@ -2492,7 +2756,27 @@ void Make_IP_CWS(int narg, char *fn[]) {
     if ((INFILE[i] = fopen(infile[i], "r")) == NULL)
       Die("Unable to open infile to read");
   }
-  if (nF == 2) {
+  if (structure_id) {
+    if (d != 5)
+      Die("-s# is only implemented for -c5");
+    if ((descriptor = FindDim5StructureDescriptor(structure_id)) == NULL)
+      Die("unknown canonical dim-5 structure id");
+    if (nF != descriptor->simplex_count)
+      Die("wrong number of input files for selected dim-5 structure");
+    for (i = 0; i < nF; i++)
+      if ((D[i] + 1) != descriptor->simplex_sizes[i])
+        Die("wrong input file dimensions for selected dim-5 structure");
+    for (i = 0; i < nF; i++) {
+      MakeSelections(INFILE[i], AUXFILE[i], descriptor->shared_counts[i]);
+      family_groups[i] = i + 1;
+      for (j = 0; j < i; j++)
+        if (!strcmp(infile[i], infile[j])) {
+          family_groups[i] = family_groups[j];
+          break;
+        }
+    }
+    MakeDim5DescriptorCWS(descriptor, AUXFILE, family_groups);
+  } else if (nF == 2) {
     if (!t.nu)
       assert((u = D[0] + D[1] - d) >= 0);
     else {
@@ -2505,8 +2789,7 @@ void Make_IP_CWS(int narg, char *fn[]) {
     for (i = 0; i < nF; i++)
       MakeSelections(INFILE[i], AUXFILE[i], u);
     Make2CWS(AUXFILE[0], AUXFILE[1], u, !strcmp(infile[0], infile[1]));
-  }
-  if (nF == 3) {
+  } else if (nF == 3) {
     if (!t.nu)
       Die("with nNUMBER and NUMBER>2 I need -t TYPE1 TYPE2 TYPE3!");
     if (((t.u[0] == 1) && (t.u[1] == 1) && (t.u[2] == 1)) ||
@@ -2550,7 +2833,8 @@ void Make_IP_CWS(int narg, char *fn[]) {
       Make_nno_CWS(AUXFILE, t.u[0], !strcmp(infile[0], infile[1]));
     } else
       PrintCWSTypes();
-  }
+  } else
+    PrintCWSTypes();
   for (i = 0; i < nF; i++) {
     fclose(INFILE[i]);
     fclose(AUXFILE[i]);
