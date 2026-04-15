@@ -16,7 +16,7 @@ typedef struct {
   int nu;
 } CWS_type;
 
-#define OSL (24) /* opt_string's length */
+#define OSL (25) /* opt_string's length */
 
 void PrintCWSUsage(char *c) {
   int i;
@@ -42,7 +42,8 @@ void PrintCWSUsage(char *c) {
       "              [-t] followed by # numbers n_i specifies the CWS-type, "
       "i.e.",
       "                   the numbers n_i of weights to be selected from wf_i.",
-      "                   Currently all cases with n_i<=2 are implemented.",
+      "                   For -n2 all equal types k k are implemented; for",
+      "                   higher arities the implemented cases are listed by -t.",
       "          -i       compute the polytope data M:p v [F:f] N:p [v] for "
       "all IP",
       "                   CWS, where p and v denote the numbers of lattice "
@@ -2260,14 +2261,103 @@ void Make_211_CWS(FILE *AUXFILE[], int ef) {
   rewind(AUXFILE[0]);
 }
 
+static __attribute__((noinline)) void Print2CWS(Weight *left, Weight *right,
+                                                int u) {
+  int n = 0;
+  CWS CW;
+
+  CW.nw = 0;
+  RW_TO_CWS(&CW, left, n, (right->N - u), n, n);
+  W_TO_CWS(&CW, right, (left->N - u), n, n, n);
+  PRINT_CWS(&CW);
+}
+
+static __attribute__((noinline)) int
+PrefixIsCanonicalForAnchor(const Weight *anchor, const Long *prefix, int u) {
+  int block_start;
+
+  if (u < 2)
+    return 1;
+
+  block_start = 0;
+  while (block_start + 1 < u) {
+    int block_end = block_start + 1;
+
+    while ((block_end < u) && (anchor->w[block_end] == anchor->w[block_start])) {
+      if (prefix[block_end - 1] > prefix[block_end])
+        return 0;
+      block_end++;
+    }
+    block_start = block_end;
+  }
+  return 1;
+}
+
+static __attribute__((noinline)) int NextPrefixPermutation(Long *values,
+                                                           int u) {
+  int left, right, swap_index;
+  Long tmp;
+
+  if (u < 2)
+    return 0;
+
+  left = u - 2;
+  while ((left >= 0) && (values[left] >= values[left + 1]))
+    left--;
+  if (left < 0)
+    return 0;
+
+  right = u - 1;
+  while (values[left] >= values[right])
+    right--;
+
+  tmp = values[left];
+  values[left] = values[right];
+  values[right] = tmp;
+
+  for (swap_index = left + 1, right = u - 1; swap_index < right;
+       swap_index++, right--) {
+    tmp = values[swap_index];
+    values[swap_index] = values[right];
+    values[right] = tmp;
+  }
+  return 1;
+}
+
+static __attribute__((noinline)) void Print2CWSPermutations(Weight *left,
+                                                            Weight *right,
+                                                            int u) {
+  Long prefix[W_Nmax];
+  Long original_prefix[W_Nmax];
+  int index;
+
+  if (u == 0) {
+    Print2CWS(left, right, u);
+    return;
+  }
+
+  for (index = 0; index < u; index++) {
+    prefix[index] = right->w[index];
+    original_prefix[index] = right->w[index];
+  }
+
+  do {
+    if (PrefixIsCanonicalForAnchor(left, prefix, u)) {
+      for (index = 0; index < u; index++)
+        right->w[index] = prefix[index];
+      Print2CWS(left, right, u);
+    }
+  } while (NextPrefixPermutation(prefix, u));
+
+  for (index = 0; index < u; index++)
+    right->w[index] = original_prefix[index];
+}
+
 void Make2CWS(FILE *AUXFILE1, FILE *AUXFILE2, int u, int ef) {
 
   Weight W1, W2;
-  int n = 0, l[2];
-  CWS CW;
+  int l[2];
 
-  if (u > 2)
-    Die("for u > 2 no support !");
   l[0] = 0;
   while (READ_Weight(&W1, AUXFILE1)) {
     l[1] = 0;
@@ -2275,18 +2365,7 @@ void Make2CWS(FILE *AUXFILE1, FILE *AUXFILE2, int u, int ef) {
     while (READ_Weight(&W2, AUXFILE2)) {
       l[1]++;
       if ((l[1] >= l[0]) || !ef) {
-        CW.nw = 0;
-        RW_TO_CWS(&CW, &W1, n, (W2.N - u), n, n);
-        W_TO_CWS(&CW, &W2, (W1.N - u), n, n, n);
-        PRINT_CWS(&CW);
-        if (u == 2)
-          if ((W1.w[0] != W1.w[1]) && (W2.w[0] != W2.w[1])) {
-            SWAP(&W2.w[0], &W2.w[1]);
-            CW.nw = 0;
-            RW_TO_CWS(&CW, &W1, n, (W2.N - u), n, n);
-            W_TO_CWS(&CW, &W2, (W1.N - u), n, n, n);
-            PRINT_CWS(&CW);
-          }
+        Print2CWSPermutations(&W1, &W2, u);
       }
     }
     rewind(AUXFILE2);
@@ -2307,9 +2386,7 @@ void PrintCWSTypes(void) {
   const char B[] = "         ";
   printf("\nThe following types are available:\n\n");
   printf("#infiles = 2 (need no -t option):\n");
-  printf("%s-c# -n2 [intile1] [infile2] (-t 0 0)\n", B);
-  printf("%s-c# -n2 [intile1] [infile2] (-t 1 1)\n", B);
-  printf("%s-c# -n2 [intile1] [infile2] (-t 2 2)\n", B);
+  printf("%s-c# -n2 [intile1] [infile2] (-t k k)\n", B);
   printf("#infiles = 3:\n");
   printf("%s-c# -n3 [intile1] [infile2] [infile3] -t n n 0\n", B);
   printf("%s-c# -n3 [intile1] [infile2] [infile3] -t 1 1 1\n", B);
