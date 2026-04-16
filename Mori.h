@@ -1,3 +1,8 @@
+#ifndef PALP_MORI_H
+#define PALP_MORI_H
+
+#include "Global.h"
+
 /* =========================================================== */
 /* ===                                                     === */
 /* ===                  M o r i . h                        === */
@@ -143,3 +148,5 @@ can hold at least Wmax sets of coefficients.
 */
 
 Long SimplexVolume(Long *V[POLY_Dmax + 1], int d);
+
+#endif

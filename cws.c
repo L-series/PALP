@@ -2477,6 +2477,55 @@ static void EmitDim5DescriptorCWS(Dim5EnumerationContext *context) {
   PRINT_CWS(&CW);
 }
 
+static int Dim5WeightAtCoordinate(const Weight *W,
+                                  const int mapping[DIM5_MAX_SIMPLEX_SIZE],
+                                  int coordinate) {
+  int i;
+
+  for (i = 0; i < W->N; i++)
+    if ((mapping[i] - 1) == coordinate)
+      return W->w[i];
+  return 0;
+}
+
+static int Dim5PrefixIsCanonical(const Dim5EnumerationContext *context,
+                                 int slot) {
+  int shared_count, i, j;
+  const int *mapping = context->descriptor->mappings[slot];
+
+  shared_count = context->descriptor->shared_counts[slot];
+  if (shared_count < 2)
+    return 1;
+
+  for (i = 0; i < shared_count - 1; i++) {
+    int left_coordinate = mapping[i] - 1;
+
+    for (j = i + 1; j < shared_count; j++) {
+      int equivalent = 1;
+      int right_coordinate = mapping[j] - 1;
+      int previous_slot;
+
+      for (previous_slot = 0; previous_slot < slot; previous_slot++) {
+        const int *previous_mapping =
+            context->descriptor->mappings[previous_slot];
+
+        if (Dim5WeightAtCoordinate(&context->weights[previous_slot],
+                                   previous_mapping, left_coordinate) !=
+            Dim5WeightAtCoordinate(&context->weights[previous_slot],
+                                   previous_mapping, right_coordinate)) {
+          equivalent = 0;
+          break;
+        }
+      }
+
+      if (equivalent && (context->weights[slot].w[i] > context->weights[slot].w[j]))
+        return 0;
+    }
+  }
+
+  return 1;
+}
+
 static __attribute__((noinline)) void
 EnumerateDim5Permutations(Dim5EnumerationContext *context, int slot) {
   int shared_count, index;
@@ -2502,7 +2551,8 @@ EnumerateDim5Permutations(Dim5EnumerationContext *context, int slot) {
   do {
     for (index = 0; index < shared_count; index++)
       context->weights[slot].w[index] = prefix[index];
-    EnumerateDim5Permutations(context, slot + 1);
+    if (Dim5PrefixIsCanonical(context, slot))
+      EnumerateDim5Permutations(context, slot + 1);
   } while (NextPrefixPermutation(prefix, shared_count));
 
   for (index = 0; index < shared_count; index++)

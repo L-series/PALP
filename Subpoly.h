@@ -1,4 +1,9 @@
+#ifndef PALP_SUBPOLY_H
+#define PALP_SUBPOLY_H
+
 #include <limits.h>
+
+#include "Global.h"
 
 #ifdef __DECC           /* use local "/tmp" on clusters: */
 #define USE_TMP_DIR (1) /* write aux-files to "/tmp"     */
@@ -237,3 +242,5 @@ void AuxPut_hNF(FILE *F, int *v, int *nu, unsigned char *Huc, FInfoList *Io,
 
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #define max(a, b) (((a) > (b)) ? (a) : (b))
+
+#endif
