@@ -18,6 +18,7 @@ typedef struct {
 
 #define DIM5_MAX_ARITY 5
 #define DIM5_MAX_SIMPLEX_SIZE 5
+#define DIM5_MAX_AMBIENT_VERTICES 10
 
 typedef struct {
   int id;
@@ -35,6 +36,13 @@ typedef struct {
   Weight weights[NFmax];
   long indices[NFmax];
 } Dim5EnumerationContext;
+
+typedef struct {
+  const Dim5StructureDescriptor *descriptor;
+  int permutation[DIM5_MAX_ARITY];
+  int used[DIM5_MAX_ARITY];
+  int reachable[DIM5_MAX_ARITY][DIM5_MAX_ARITY];
+} Dim5AutomorphismContext;
 
 #define OSL (28) /* opt_string's length */
 
@@ -2436,6 +2444,110 @@ void MakeSelections(FILE *INFILE, FILE *AUXFILE, int u) {
   rewind(INFILE);
 }
 
+static int IsDim5DescriptorAutomorphism(
+    const Dim5StructureDescriptor *descriptor,
+    const int permutation[DIM5_MAX_ARITY]) {
+  int coordinate_map[DIM5_MAX_AMBIENT_VERTICES + 1] = {0};
+  int inverse_coordinate_map[DIM5_MAX_AMBIENT_VERTICES + 1] = {0};
+  int slot, position;
+
+  assert(descriptor->ambient_vertices <= DIM5_MAX_AMBIENT_VERTICES);
+
+  for (slot = 0; slot < descriptor->simplex_count; slot++) {
+    int target_slot = permutation[slot];
+    int simplex_size = descriptor->simplex_sizes[slot];
+
+    if (simplex_size != descriptor->simplex_sizes[target_slot])
+      return 0;
+    if (descriptor->shared_counts[slot] != descriptor->shared_counts[target_slot])
+      return 0;
+
+    for (position = 0; position < simplex_size; position++) {
+      int source_coordinate = descriptor->mappings[slot][position];
+      int target_coordinate = descriptor->mappings[target_slot][position];
+
+      assert((source_coordinate >= 1) &&
+             (source_coordinate <= descriptor->ambient_vertices));
+      assert((target_coordinate >= 1) &&
+             (target_coordinate <= descriptor->ambient_vertices));
+
+      if (coordinate_map[source_coordinate] == 0) {
+        if ((inverse_coordinate_map[target_coordinate] != 0) &&
+            (inverse_coordinate_map[target_coordinate] != source_coordinate))
+          return 0;
+        coordinate_map[source_coordinate] = target_coordinate;
+        inverse_coordinate_map[target_coordinate] = source_coordinate;
+      } else if (coordinate_map[source_coordinate] != target_coordinate)
+        return 0;
+    }
+  }
+
+  return 1;
+}
+
+static void EnumerateDim5SlotAutomorphisms(Dim5AutomorphismContext *context,
+                                           int slot) {
+  int target_slot;
+
+  if (slot >= context->descriptor->simplex_count) {
+    if (IsDim5DescriptorAutomorphism(context->descriptor, context->permutation)) {
+      int i;
+
+      for (i = 0; i < context->descriptor->simplex_count; i++)
+        context->reachable[i][context->permutation[i]] = 1;
+    }
+    return;
+  }
+
+  for (target_slot = 0; target_slot < context->descriptor->simplex_count;
+       target_slot++) {
+    if (context->used[target_slot])
+      continue;
+    if (context->descriptor->simplex_sizes[slot] !=
+        context->descriptor->simplex_sizes[target_slot])
+      continue;
+    if (context->descriptor->shared_counts[slot] !=
+        context->descriptor->shared_counts[target_slot])
+      continue;
+
+    context->permutation[slot] = target_slot;
+    context->used[target_slot] = 1;
+    EnumerateDim5SlotAutomorphisms(context, slot + 1);
+    context->used[target_slot] = 0;
+  }
+}
+
+static void ComputeDim5SlotOrbitGroups(const Dim5StructureDescriptor *descriptor,
+                                       int orbit_groups[DIM5_MAX_ARITY]) {
+  Dim5AutomorphismContext context;
+  int i, j, next_group = 1;
+
+  memset(&context, 0, sizeof(context));
+  context.descriptor = descriptor;
+
+  for (i = 0; i < descriptor->simplex_count; i++)
+    context.reachable[i][i] = 1;
+
+  EnumerateDim5SlotAutomorphisms(&context, 0);
+
+  for (i = 0; i < DIM5_MAX_ARITY; i++)
+    orbit_groups[i] = 0;
+
+  for (i = 0; i < descriptor->simplex_count; i++) {
+    if (orbit_groups[i])
+      continue;
+    orbit_groups[i] = next_group;
+    for (j = i + 1; j < descriptor->simplex_count; j++)
+      if (context.reachable[i][j])
+        orbit_groups[j] = next_group;
+    next_group++;
+  }
+}
+
+static int Dim5CombineFamilyGroup(int source_group, int orbit_group) {
+  return source_group * (DIM5_MAX_ARITY + 1) + orbit_group;
+}
+
 static const Dim5StructureDescriptor *
 FindDim5StructureDescriptor(int structure_id) {
   int i;
@@ -2634,6 +2746,7 @@ void Make_5_CWS(int structure_id) {
   FILE *weight_files[DIM5_MAX_SIMPLEX_SIZE + 1];
   FILE *AUXFILE[DIM5_MAX_ARITY] = {NULL};
   int family_groups[DIM5_MAX_ARITY] = {0};
+  int orbit_groups[DIM5_MAX_ARITY] = {0};
   int need_five_weights = 0, matched = 0, i, j;
 
   for (i = 0; i < (int)(sizeof(kDim5Structures) / sizeof(kDim5Structures[0])); i++) {
@@ -2655,12 +2768,15 @@ void Make_5_CWS(int structure_id) {
     if (structure_id && (descriptor->id != structure_id))
       continue;
 
+    ComputeDim5SlotOrbitGroups(descriptor, orbit_groups);
+
     for (j = 0; j < descriptor->simplex_count; j++) {
       if ((AUXFILE[j] = tmpfile()) == NULL)
         Die("Unable to open tmpfile to read/write");
       MakeSelections(weight_files[descriptor->simplex_sizes[j]], AUXFILE[j],
                      descriptor->shared_counts[j]);
-      family_groups[j] = descriptor->simplex_sizes[j];
+      family_groups[j] = Dim5CombineFamilyGroup(descriptor->simplex_sizes[j],
+                                                orbit_groups[j]);
     }
 
     MakeDim5DescriptorCWS(descriptor, AUXFILE, family_groups);
@@ -2807,6 +2923,9 @@ void Make_IP_CWS(int narg, char *fn[]) {
       Die("Unable to open infile to read");
   }
   if (structure_id) {
+    int orbit_groups[DIM5_MAX_ARITY] = {0};
+    int source_groups[DIM5_MAX_ARITY] = {0};
+
     if (d != 5)
       Die("-s# is only implemented for -c5");
     if ((descriptor = FindDim5StructureDescriptor(structure_id)) == NULL)
@@ -2816,14 +2935,17 @@ void Make_IP_CWS(int narg, char *fn[]) {
     for (i = 0; i < nF; i++)
       if ((D[i] + 1) != descriptor->simplex_sizes[i])
         Die("wrong input file dimensions for selected dim-5 structure");
+    ComputeDim5SlotOrbitGroups(descriptor, orbit_groups);
     for (i = 0; i < nF; i++) {
       MakeSelections(INFILE[i], AUXFILE[i], descriptor->shared_counts[i]);
-      family_groups[i] = i + 1;
+      source_groups[i] = i + 1;
       for (j = 0; j < i; j++)
         if (!strcmp(infile[i], infile[j])) {
-          family_groups[i] = family_groups[j];
+          source_groups[i] = source_groups[j];
           break;
         }
+      family_groups[i] = Dim5CombineFamilyGroup(source_groups[i],
+                                                orbit_groups[i]);
     }
     MakeDim5DescriptorCWS(descriptor, AUXFILE, family_groups);
   } else if (nF == 2) {
