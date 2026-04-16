@@ -1,3 +1,8 @@
+#ifndef PALP_NEF_H
+#define PALP_NEF_H
+
+#include "Global.h"
+
 #define Nef_Max 500000
 #define NP_Max 500000
 #define W_Nmax (POLY_Dmax + 1)
@@ -123,3 +128,5 @@ void Print_CWS_Zinfo(CWS *);
 
 void AnalyseGorensteinCone(CWS *_CW, PolyPointList *_P, VertexNumList *_V,
                            EqList *_E, int *_codim, Flags *_F);
+
+#endif

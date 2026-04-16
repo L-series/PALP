@@ -1,3 +1,6 @@
+#ifndef PALP_GLOBAL_H
+#define PALP_GLOBAL_H
+
 #include <assert.h>
 #ifdef PALP_FAST_ASSERT
 /* Evaluate assertion expressions (preserving side effects) AND abort on
@@ -655,3 +658,5 @@ int QuickAnalysis(PolyPointList *_P, BaHo *_BH, FaceInfo *_FI);
 /*
 Fast computation of FaceInfo and Hodge numbers.
 */
+
+#endif
