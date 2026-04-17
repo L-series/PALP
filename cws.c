@@ -30,11 +30,30 @@ typedef struct {
 } Dim5StructureDescriptor;
 
 typedef struct {
+  int d;
+  int N;
+  Long w[W_Nmax];
+} Dim5WeightEntry;
+
+typedef struct {
+  Dim5WeightEntry *items;
+  long count;
+  long capacity;
+} Dim5WeightPool;
+
+typedef struct {
+  long shard_count;
+  long shard_index;
+} Dim5RuntimeOptions;
+
+typedef struct {
   const Dim5StructureDescriptor *descriptor;
-  FILE *inputs[NFmax];
+  const Dim5WeightPool *inputs[NFmax];
   int family_groups[NFmax];
-  Weight weights[NFmax];
+  Dim5WeightEntry weights[NFmax];
   long indices[NFmax];
+  long shard_count;
+  long shard_index;
 } Dim5EnumerationContext;
 
 typedef struct {
@@ -44,7 +63,15 @@ typedef struct {
   int reachable[DIM5_MAX_ARITY][DIM5_MAX_ARITY];
 } Dim5AutomorphismContext;
 
-#define OSL (28) /* opt_string's length */
+typedef struct {
+  PolyPointList *P;
+  PolyPointList *DP;
+} CWSPrintWorkspace;
+
+static Dim5RuntimeOptions gDim5RuntimeOptions = {1, 0};
+static CWSPrintWorkspace gCWSPrintWorkspace = {NULL, NULL};
+
+#define OSL (30) /* opt_string's length */
 
 void PrintCWSUsage(char *c) {
   int i;
@@ -66,6 +93,8 @@ void PrintCWSUsage(char *c) {
       "default,",
       "                   for #=5 the builtin canonical dim-5 structures are",
       "                   available, optionally restricted by -s#.",
+      "                   Use -j# and -k# to shard dim-5 enumeration across",
+      "                   # workers with 1-based worker index -k#.",
       "                   Otherwise the following option is required:",
       "             -n[#] followed by the names wf_1 ... wf_# of weight files",
       "                   legacy typed input supports #=2,3; dim-5 generic",
@@ -97,10 +126,16 @@ void PrintCWSUsage(char *c) {
   exit(0);
 }
 
-void Die(char *comment) {
+void Die(const char *comment) {
   printf("\n%s\n", comment);
   exit(0);
 }
+
+static void ResetDim5RuntimeOptions(void);
+static void ParseDim5ShardCountOption(const char *value);
+static void ParseDim5ShardIndexOption(const char *value);
+static void ValidateDim5RuntimeOptions(void);
+static int Dim5RuntimeOptionsModified(void);
 
 int Read_Weight(Weight *);
 
@@ -787,6 +822,8 @@ void Make_34_CWS(int d);
 void Init_IP_CWS(int narg, char *fn[]) {
   int d, n = 1, nop = 0, structure_id = 0;
   char *c = &fn[1][2];
+
+  ResetDim5RuntimeOptions();
   if (narg > 2)
     if (c[0] == 0)
       c = fn[++n];
@@ -811,9 +848,23 @@ void Init_IP_CWS(int narg, char *fn[]) {
       if (!IsDigit(c[0]))
         Die("after -s there must be a digit!");
       structure_id = atoi(c);
+    } else if ((fn[n][0] == '-') && (fn[n][1] == 'j')) {
+      if ((fn[n][2] == 0) && (narg > n + 1))
+        c = fn[++n];
+      else
+        c = &fn[n][2];
+      ParseDim5ShardCountOption(c);
+    } else if ((fn[n][0] == '-') && (fn[n][1] == 'k')) {
+      if ((fn[n][2] == 0) && (narg > n + 1))
+        c = fn[++n];
+      else
+        c = &fn[n][2];
+      ParseDim5ShardIndexOption(c);
     } else
       Die("illegal option after -c#");
   }
+  if (Dim5RuntimeOptionsModified() && (d != 5))
+    Die("-j# and -k# are only implemented for -c5");
   if (nop)
     Make_IP_CWS(narg, fn);
   else if (d <= 4) {
@@ -1704,8 +1755,9 @@ void W_TO_CWS(CWS *, Weight *, int, int, int, int);
 void PRINT_CWS(CWS *);
 void Make_111_CWS(FILE **, int *);
 void Make_nno_CWS(FILE **, int, int);
-  void MakeDim5DescriptorCWS(const Dim5StructureDescriptor *descriptor,
-                 FILE *AUXFILE[], int family_groups[]);
+void MakeDim5DescriptorCWS(const Dim5StructureDescriptor *descriptor,
+                           const Dim5WeightPool *AUXPOOL[],
+                           int family_groups[]);
 
 void STtmp(FILE *w2FILE, FILE *w3FILE, FILE *w4FILE) {
   int i, j;
@@ -1970,6 +2022,268 @@ void Select_n_of_W(Weight *_W, int n, FILE *auxFILE) {
   }
 }
 
+static long ParsePositiveDim5Option(const char *value,
+                                    const char *option_name) {
+  char *end = NULL;
+  long parsed_value;
+
+  if ((value == NULL) || !IsDigit(*value))
+    Die(option_name);
+
+  parsed_value = strtol(value, &end, 10);
+  if ((*end != 0) || (parsed_value <= 0))
+    Die(option_name);
+  return parsed_value;
+}
+
+static void ResetDim5RuntimeOptions(void) {
+  gDim5RuntimeOptions.shard_count = 1;
+  gDim5RuntimeOptions.shard_index = 0;
+}
+
+static int Dim5RuntimeOptionsModified(void) {
+  return (gDim5RuntimeOptions.shard_count != 1) ||
+         (gDim5RuntimeOptions.shard_index != 0);
+}
+
+static void ParseDim5ShardCountOption(const char *value) {
+  gDim5RuntimeOptions.shard_count = ParsePositiveDim5Option(
+      value, "-j must be followed by a positive integer");
+}
+
+static void ParseDim5ShardIndexOption(const char *value) {
+  long shard_index = ParsePositiveDim5Option(
+      value, "-k must be followed by a positive integer");
+
+  gDim5RuntimeOptions.shard_index = shard_index - 1;
+}
+
+static void ValidateDim5RuntimeOptions(void) {
+  if (gDim5RuntimeOptions.shard_index >= gDim5RuntimeOptions.shard_count)
+    Die("dim-5 worker index -k must be between 1 and the shard count -j");
+}
+
+static int Dim5IndexBelongsToShard(long index, long shard_count,
+                                   long shard_index) {
+  if (shard_count <= 1)
+    return 1;
+  return ((index - 1) % shard_count) == shard_index;
+}
+
+static void InitDim5WeightPool(Dim5WeightPool *pool) {
+  pool->items = NULL;
+  pool->count = 0;
+  pool->capacity = 0;
+}
+
+static void FreeDim5WeightPool(Dim5WeightPool *pool) {
+  free(pool->items);
+  pool->items = NULL;
+  pool->count = 0;
+  pool->capacity = 0;
+}
+
+static void EnsureDim5WeightPoolCapacity(Dim5WeightPool *pool,
+                                         long min_capacity) {
+  long new_capacity;
+  Dim5WeightEntry *new_items;
+
+  if (pool->capacity >= min_capacity)
+    return;
+
+  new_capacity = pool->capacity ? 2 * pool->capacity : 64;
+  while (new_capacity < min_capacity)
+    new_capacity *= 2;
+
+  new_items = (Dim5WeightEntry *)realloc(
+      pool->items, (size_t)new_capacity * sizeof(Dim5WeightEntry));
+  if (new_items == NULL)
+    Die("Unable to allocate dim-5 weight pool");
+
+  pool->items = new_items;
+  pool->capacity = new_capacity;
+}
+
+static void AppendDim5WeightEntry(Dim5WeightPool *pool,
+                                  const Dim5WeightEntry *entry) {
+  EnsureDim5WeightPoolCapacity(pool, pool->count + 1);
+  pool->items[pool->count++] = *entry;
+}
+
+static void CopyDim5WeightEntryFromWeight(Dim5WeightEntry *entry,
+                                          const Weight *weight) {
+  int i;
+
+  memset(entry, 0, sizeof(*entry));
+  entry->d = weight->d;
+  entry->N = weight->N;
+  for (i = 0; i < weight->N; i++)
+    entry->w[i] = weight->w[i];
+}
+
+static void CopyDim5WeightEntryFromInts(Dim5WeightEntry *entry, int degree,
+                                        int count, const int *weights) {
+  int i;
+
+  memset(entry, 0, sizeof(*entry));
+  entry->d = degree;
+  entry->N = count;
+  for (i = 0; i < count; i++)
+    entry->w[i] = weights[i];
+}
+
+static void AppendDim5SelectedWeight(const int *selected_indices,
+                                     int selected_count,
+                                     const Dim5WeightEntry *source,
+                                     Dim5WeightPool *pool) {
+  Dim5WeightEntry entry;
+  int i, selected_position = 0, output_position = 0;
+
+  memset(&entry, 0, sizeof(entry));
+  entry.d = source->d;
+  entry.N = source->N;
+
+  for (i = 0; i < selected_count; i++)
+    entry.w[output_position++] = source->w[selected_indices[i]];
+
+  for (i = 0; i < source->N; i++) {
+    if ((selected_position < selected_count) &&
+        (i == selected_indices[selected_position])) {
+      selected_position++;
+      continue;
+    }
+    entry.w[output_position++] = source->w[i];
+  }
+
+  assert(output_position == source->N);
+  AppendDim5WeightEntry(pool, &entry);
+}
+
+static void EnumerateDim5Selections(const Dim5WeightEntry *source,
+                                    int target_count,
+                                    int selected_indices[W_Nmax],
+                                    int selected_so_far,
+                                    Dim5WeightPool *pool) {
+  int i, last_index;
+
+  if (selected_so_far == target_count) {
+    AppendDim5SelectedWeight(selected_indices, target_count, source, pool);
+    return;
+  }
+
+  last_index = selected_indices[selected_so_far - 1];
+  if (last_index == source->N - 1)
+    return;
+
+  if (source->w[last_index + 1] == source->w[last_index]) {
+    selected_indices[selected_so_far] = last_index + 1;
+    EnumerateDim5Selections(source, target_count, selected_indices,
+                            selected_so_far + 1, pool);
+  }
+
+  for (i = last_index + 1; i < source->N; i++)
+    if (source->w[i] > source->w[i - 1]) {
+      selected_indices[selected_so_far] = i;
+      EnumerateDim5Selections(source, target_count, selected_indices,
+                              selected_so_far + 1, pool);
+    }
+}
+
+static void SelectDim5Weights(const Dim5WeightEntry *source, int selected_count,
+                              Dim5WeightPool *pool) {
+  int i;
+  int selected_indices[W_Nmax];
+
+  if (selected_count == 0) {
+    AppendDim5WeightEntry(pool, source);
+    return;
+  }
+
+  for (i = 1; i < source->N; i++)
+    if (source->w[i] < source->w[i - 1])
+      Die("Weights must be sorted: W_1 <= W_2 <= ... <= W_N!");
+
+  selected_indices[0] = 0;
+  EnumerateDim5Selections(source, selected_count, selected_indices, 1, pool);
+  for (i = 1; i < source->N; i++)
+    if (source->w[i] > source->w[i - 1]) {
+      selected_indices[0] = i;
+      EnumerateDim5Selections(source, selected_count, selected_indices, 1,
+                              pool);
+    }
+}
+
+static void LoadDim5BasePoolFromFile(FILE *input, Dim5WeightPool *pool) {
+  Weight weight;
+
+  while (READ_Weight(&weight, input)) {
+    Dim5WeightEntry entry;
+
+    CopyDim5WeightEntryFromWeight(&entry, &weight);
+    AppendDim5WeightEntry(pool, &entry);
+  }
+  rewind(input);
+}
+
+static void PopulateDim5BuiltinBasePool(Dim5WeightPool *pool,
+                                        int simplex_size) {
+  int i;
+
+  switch (simplex_size) {
+  case 2: {
+    Dim5WeightEntry entry;
+
+    CopyDim5WeightEntryFromInts(&entry, W2.d, 2, W2.w);
+    AppendDim5WeightEntry(pool, &entry);
+    break;
+  }
+  case 3:
+    for (i = 0; i < 3; i++) {
+      Dim5WeightEntry entry;
+
+      CopyDim5WeightEntryFromInts(&entry, W3[i].d, 3, W3[i].w);
+      AppendDim5WeightEntry(pool, &entry);
+    }
+    break;
+  case 4:
+    for (i = 0; i < 95; i++) {
+      Dim5WeightEntry entry;
+
+      CopyDim5WeightEntryFromInts(&entry, W4[i].d, 4, W4[i].w);
+      AppendDim5WeightEntry(pool, &entry);
+    }
+    break;
+  default:
+    Die("unsupported builtin dim-5 simplex size");
+  }
+}
+
+static void BuildDim5BuiltinBasePools(Dim5WeightPool base_pools[],
+                                      int need_five_weights) {
+  FILE *generated_five_weights = NULL;
+  FILE *saved_outFILE = outFILE;
+  int i;
+
+  for (i = 0; i <= DIM5_MAX_SIMPLEX_SIZE; i++)
+    InitDim5WeightPool(&base_pools[i]);
+
+  PopulateDim5BuiltinBasePool(&base_pools[2], 2);
+  PopulateDim5BuiltinBasePool(&base_pools[3], 3);
+  PopulateDim5BuiltinBasePool(&base_pools[4], 4);
+
+  if (!need_five_weights)
+    return;
+
+  if ((generated_five_weights = tmpfile()) == NULL)
+    Die("Unable to open tmpfile for read/write");
+  outFILE = generated_five_weights;
+  Make_34_Weights(4, 0, 0);
+  outFILE = saved_outFILE;
+  rewind(generated_five_weights);
+  LoadDim5BasePoolFromFile(generated_five_weights, &base_pools[5]);
+  fclose(generated_five_weights);
+}
+
 void PRINT_CWS(CWS *CW) {
 #if (!Only_IP_CWS)
   {
@@ -1981,12 +2295,25 @@ void PRINT_CWS(CWS *CW) {
     PolyPointList *P, *DP;
     EqList E;
     VertexNumList V;
-    P = (PolyPointList *)malloc(sizeof(PolyPointList));
-    if (P == NULL)
-      Die("Unable to allocate space for P");
-    DP = (PolyPointList *)malloc(sizeof(PolyPointList));
-    if (DP == NULL)
-      Die("Unable to allocate space for DP");
+
+    if (gCWSPrintWorkspace.P == NULL) {
+      gCWSPrintWorkspace.P =
+          (PolyPointList *)malloc(sizeof(PolyPointList));
+      if (gCWSPrintWorkspace.P == NULL)
+        Die("Unable to allocate space for P");
+    }
+    if (gCWSPrintWorkspace.DP == NULL) {
+      gCWSPrintWorkspace.DP =
+          (PolyPointList *)malloc(sizeof(PolyPointList));
+      if (gCWSPrintWorkspace.DP == NULL) {
+        free(gCWSPrintWorkspace.P);
+        gCWSPrintWorkspace.P = NULL;
+        Die("Unable to allocate space for DP");
+      }
+    }
+
+    P = gCWSPrintWorkspace.P;
+    DP = gCWSPrintWorkspace.DP;
     CW->index = 1;
     Make_CWS_Points(CW, P);
     if (IP_Check(P, &V, &E)) {
@@ -2004,8 +2331,6 @@ void PRINT_CWS(CWS *CW) {
       assert(IP_Check(DP, &V, &E));
       fprintf(outFILE, "\n");
     }
-    free(DP);
-    free(P);
   }
 #endif
 }
@@ -2559,7 +2884,8 @@ FindDim5StructureDescriptor(int structure_id) {
   return NULL;
 }
 
-static void EmbedWeightInCWS(CWS *CW, const Weight *W, int ambient_vertices,
+static void EmbedWeightInCWS(CWS *CW, const Dim5WeightEntry *W,
+                             int ambient_vertices,
                              const int mapping[DIM5_MAX_SIMPLEX_SIZE]) {
   int i;
 
@@ -2589,7 +2915,7 @@ static void EmitDim5DescriptorCWS(Dim5EnumerationContext *context) {
   PRINT_CWS(&CW);
 }
 
-static int Dim5WeightAtCoordinate(const Weight *W,
+static int Dim5WeightAtCoordinate(const Dim5WeightEntry *W,
                                   const int mapping[DIM5_MAX_SIMPLEX_SIZE],
                                   int coordinate) {
   int i;
@@ -2684,13 +3010,23 @@ static int Dim5SelectionOrderIsCanonical(const Dim5EnumerationContext *context,
 
 static __attribute__((noinline)) void EnumerateDim5Weights(
     Dim5EnumerationContext *context, int slot) {
-  long index = 0;
+  const Dim5WeightPool *pool;
+  long index;
 
   if (slot >= context->descriptor->simplex_count)
     return;
 
-  while (READ_Weight(&context->weights[slot], context->inputs[slot])) {
-    index++;
+  pool = context->inputs[slot];
+  if (pool == NULL)
+    return;
+
+  for (index = 1; index <= pool->count; index++) {
+    if ((slot == 0) &&
+        !Dim5IndexBelongsToShard(index, context->shard_count,
+                                 context->shard_index))
+      continue;
+
+    context->weights[slot] = pool->items[index - 1];
     context->indices[slot] = index;
     if (Dim5SelectionOrderIsCanonical(context, slot)) {
       if (slot + 1 == context->descriptor->simplex_count)
@@ -2700,54 +3036,37 @@ static __attribute__((noinline)) void EnumerateDim5Weights(
     }
   }
   context->indices[slot] = 0;
-  rewind(context->inputs[slot]);
 }
 
 void MakeDim5DescriptorCWS(const Dim5StructureDescriptor *descriptor,
-                           FILE *AUXFILE[], int family_groups[]) {
+                           const Dim5WeightPool *AUXPOOL[],
+                           int family_groups[]) {
   Dim5EnumerationContext context;
   int i;
 
   context.descriptor = descriptor;
   for (i = 0; i < DIM5_MAX_ARITY; i++) {
-    context.inputs[i] = AUXFILE[i];
+    context.inputs[i] = AUXPOOL[i];
     context.family_groups[i] = family_groups[i];
     context.indices[i] = 0;
   }
+  context.shard_count = gDim5RuntimeOptions.shard_count;
+  context.shard_index = gDim5RuntimeOptions.shard_index;
   EnumerateDim5Weights(&context, 0);
 }
 
-static void BuildDim5BuiltinFiles(FILE *weight_files[], int need_five_weights) {
-  FILE *saved_outFILE = outFILE;
-  int i;
-
-  for (i = 0; i <= DIM5_MAX_SIMPLEX_SIZE; i++)
-    weight_files[i] = NULL;
-
-  if ((weight_files[2] = tmpfile()) == NULL)
-    Die("Unable to open tmpfile for read/write");
-  if ((weight_files[3] = tmpfile()) == NULL)
-    Die("Unable to open tmpfile for read/write");
-  if ((weight_files[4] = tmpfile()) == NULL)
-    Die("Unable to open tmpfile for read/write");
-  STtmp(weight_files[2], weight_files[3], weight_files[4]);
-
-  if (need_five_weights) {
-    if ((weight_files[5] = tmpfile()) == NULL)
-      Die("Unable to open tmpfile for read/write");
-    outFILE = weight_files[5];
-    Make_34_Weights(4, 0, 0);
-    outFILE = saved_outFILE;
-    rewind(weight_files[5]);
-  }
-}
-
 void Make_5_CWS(int structure_id) {
-  FILE *weight_files[DIM5_MAX_SIMPLEX_SIZE + 1];
-  FILE *AUXFILE[DIM5_MAX_ARITY] = {NULL};
+  Dim5WeightPool base_pools[DIM5_MAX_SIMPLEX_SIZE + 1];
+  Dim5WeightPool selection_cache[DIM5_MAX_SIMPLEX_SIZE + 1]
+                                [DIM5_MAX_SIMPLEX_SIZE] = {{{0}}};
+  int selection_cache_ready[DIM5_MAX_SIMPLEX_SIZE + 1]
+                           [DIM5_MAX_SIMPLEX_SIZE] = {{0}};
+  const Dim5WeightPool *AUXPOOL[DIM5_MAX_ARITY] = {NULL};
   int family_groups[DIM5_MAX_ARITY] = {0};
   int orbit_groups[DIM5_MAX_ARITY] = {0};
   int need_five_weights = 0, matched = 0, i, j;
+
+  ValidateDim5RuntimeOptions();
 
   for (i = 0; i < (int)(sizeof(kDim5Structures) / sizeof(kDim5Structures[0])); i++) {
     const Dim5StructureDescriptor *descriptor = &kDim5Structures[i];
@@ -2761,7 +3080,7 @@ void Make_5_CWS(int structure_id) {
   if (!matched)
     Die("unknown canonical dim-5 structure id");
 
-  BuildDim5BuiltinFiles(weight_files, need_five_weights);
+  BuildDim5BuiltinBasePools(base_pools, need_five_weights);
 
   for (i = 0; i < (int)(sizeof(kDim5Structures) / sizeof(kDim5Structures[0])); i++) {
     const Dim5StructureDescriptor *descriptor = &kDim5Structures[i];
@@ -2771,25 +3090,33 @@ void Make_5_CWS(int structure_id) {
     ComputeDim5SlotOrbitGroups(descriptor, orbit_groups);
 
     for (j = 0; j < descriptor->simplex_count; j++) {
-      if ((AUXFILE[j] = tmpfile()) == NULL)
-        Die("Unable to open tmpfile to read/write");
-      MakeSelections(weight_files[descriptor->simplex_sizes[j]], AUXFILE[j],
-                     descriptor->shared_counts[j]);
+      int simplex_size = descriptor->simplex_sizes[j];
+      int shared_count = descriptor->shared_counts[j];
+
+      if (!selection_cache_ready[simplex_size][shared_count]) {
+        long k;
+
+        InitDim5WeightPool(&selection_cache[simplex_size][shared_count]);
+        for (k = 0; k < base_pools[simplex_size].count; k++)
+          SelectDim5Weights(&base_pools[simplex_size].items[k], shared_count,
+                            &selection_cache[simplex_size][shared_count]);
+        selection_cache_ready[simplex_size][shared_count] = 1;
+      }
+
+      AUXPOOL[j] = &selection_cache[simplex_size][shared_count];
       family_groups[j] = Dim5CombineFamilyGroup(descriptor->simplex_sizes[j],
                                                 orbit_groups[j]);
     }
 
-    MakeDim5DescriptorCWS(descriptor, AUXFILE, family_groups);
-
-    for (j = 0; j < descriptor->simplex_count; j++) {
-      fclose(AUXFILE[j]);
-      AUXFILE[j] = NULL;
-    }
+    MakeDim5DescriptorCWS(descriptor, AUXPOOL, family_groups);
   }
 
-  for (i = 2; i <= DIM5_MAX_SIMPLEX_SIZE; i++)
-    if (weight_files[i] != NULL)
-      fclose(weight_files[i]);
+  for (i = 0; i <= DIM5_MAX_SIMPLEX_SIZE; i++)
+    FreeDim5WeightPool(&base_pools[i]);
+  for (i = 0; i <= DIM5_MAX_SIMPLEX_SIZE; i++)
+    for (j = 0; j < DIM5_MAX_SIMPLEX_SIZE; j++)
+      if (selection_cache_ready[i][j])
+        FreeDim5WeightPool(&selection_cache[i][j]);
 }
 
 void PrintCWSTypes(void) {
@@ -2898,6 +3225,18 @@ void Make_IP_CWS(int narg, char *fn[]) {
       if (!IsDigit(*a))
         Die("after -s there must be a digit!");
       structure_id = atoi(a);
+    } else if (fn[n][1] == 'j') {
+      if ((fn[n][2] == 0) && (narg > n + 1))
+        a = fn[++n];
+      else
+        a = &fn[n][2];
+      ParseDim5ShardCountOption(a);
+    } else if (fn[n][1] == 'k') {
+      if ((fn[n][2] == 0) && (narg > n + 1))
+        a = fn[++n];
+      else
+        a = &fn[n][2];
+      ParseDim5ShardIndexOption(a);
     } else
       Die("illegal option in -c# invocation");
   }
@@ -2905,6 +3244,10 @@ void Make_IP_CWS(int narg, char *fn[]) {
     Die("there is no -n#infiles!");
   if (d == 0)
     Die("No dimensoin specified!");
+  if (Dim5RuntimeOptionsModified() && ((d != 5) || !structure_id))
+    Die("-j# and -k# require canonical dim-5 structure enumeration via -c5 -s#");
+  if (structure_id)
+    ValidateDim5RuntimeOptions();
   if (t.nu && (t.nu != nF))
     Die("if input is -nN -t k_1,...,k_n then N must be equal to n!");
   if (structure_id && t.nu)
@@ -2917,12 +3260,15 @@ void Make_IP_CWS(int narg, char *fn[]) {
   }
   scan_dim(nF, infile, D);
   for (i = 0; i < nF; i++) {
-    if ((AUXFILE[i] = tmpfile()) == NULL)
-      Die("Unable to open tmpfile to read/write");
     if ((INFILE[i] = fopen(infile[i], "r")) == NULL)
       Die("Unable to open infile to read");
   }
   if (structure_id) {
+    Dim5WeightPool input_pools[NFmax] = {{0}};
+    Dim5WeightPool selection_pools[NFmax] = {{0}};
+    int input_owner[NFmax];
+    int selection_owner[NFmax];
+    const Dim5WeightPool *AUXPOOL[NFmax] = {NULL};
     int orbit_groups[DIM5_MAX_ARITY] = {0};
     int source_groups[DIM5_MAX_ARITY] = {0};
 
@@ -2935,19 +3281,49 @@ void Make_IP_CWS(int narg, char *fn[]) {
     for (i = 0; i < nF; i++)
       if ((D[i] + 1) != descriptor->simplex_sizes[i])
         Die("wrong input file dimensions for selected dim-5 structure");
-    ComputeDim5SlotOrbitGroups(descriptor, orbit_groups);
     for (i = 0; i < nF; i++) {
-      MakeSelections(INFILE[i], AUXFILE[i], descriptor->shared_counts[i]);
-      source_groups[i] = i + 1;
+      input_owner[i] = i;
       for (j = 0; j < i; j++)
         if (!strcmp(infile[i], infile[j])) {
-          source_groups[i] = source_groups[j];
+          input_owner[i] = input_owner[j];
           break;
         }
+      selection_owner[i] = i;
+    }
+    ComputeDim5SlotOrbitGroups(descriptor, orbit_groups);
+    for (i = 0; i < nF; i++) {
+      if (input_owner[i] == i)
+        LoadDim5BasePoolFromFile(INFILE[i], &input_pools[i]);
+
+      source_groups[i] = input_owner[i] + 1;
+      for (j = 0; j < i; j++)
+        if ((input_owner[i] == input_owner[j]) &&
+            (descriptor->shared_counts[i] == descriptor->shared_counts[j])) {
+          selection_owner[i] = selection_owner[j];
+          break;
+        }
+
+      if (selection_owner[i] == i) {
+        InitDim5WeightPool(&selection_pools[i]);
+        for (j = 0; j < input_pools[input_owner[i]].count; j++)
+          SelectDim5Weights(&input_pools[input_owner[i]].items[j],
+                            descriptor->shared_counts[i],
+                            &selection_pools[i]);
+      }
+
+      AUXPOOL[i] = &selection_pools[selection_owner[i]];
       family_groups[i] = Dim5CombineFamilyGroup(source_groups[i],
                                                 orbit_groups[i]);
     }
-    MakeDim5DescriptorCWS(descriptor, AUXFILE, family_groups);
+
+    MakeDim5DescriptorCWS(descriptor, AUXPOOL, family_groups);
+
+    for (i = 0; i < nF; i++) {
+      if (selection_owner[i] == i)
+        FreeDim5WeightPool(&selection_pools[i]);
+      if (input_owner[i] == i)
+        FreeDim5WeightPool(&input_pools[i]);
+    }
   } else if (nF == 2) {
     if (!t.nu)
       assert((u = D[0] + D[1] - d) >= 0);
@@ -2959,11 +3335,17 @@ void Make_IP_CWS(int narg, char *fn[]) {
       u = t.u[0];
     }
     for (i = 0; i < nF; i++)
+      if ((AUXFILE[i] = tmpfile()) == NULL)
+        Die("Unable to open tmpfile to read/write");
+    for (i = 0; i < nF; i++)
       MakeSelections(INFILE[i], AUXFILE[i], u);
     Make2CWS(AUXFILE[0], AUXFILE[1], u, !strcmp(infile[0], infile[1]));
   } else if (nF == 3) {
     if (!t.nu)
       Die("with nNUMBER and NUMBER>2 I need -t TYPE1 TYPE2 TYPE3!");
+    for (i = 0; i < nF; i++)
+      if ((AUXFILE[i] = tmpfile()) == NULL)
+        Die("Unable to open tmpfile to read/write");
     if (((t.u[0] == 1) && (t.u[1] == 1) && (t.u[2] == 1)) ||
         ((t.u[0] == 2) && (t.u[1] == 2) && (t.u[2] == 2))) {
       int eq[2];
@@ -3009,7 +3391,8 @@ void Make_IP_CWS(int narg, char *fn[]) {
     PrintCWSTypes();
   for (i = 0; i < nF; i++) {
     fclose(INFILE[i]);
-    fclose(AUXFILE[i]);
+    if (AUXFILE[i] != NULL)
+      fclose(AUXFILE[i]);
   }
 }
 
