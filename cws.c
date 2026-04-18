@@ -1,3 +1,5 @@
+#include <time.h>
+
 #include "Global.h"
 #include "LG.h"
 #include "Rat.h"
@@ -19,6 +21,7 @@ typedef struct {
 #define DIM5_MAX_ARITY 5
 #define DIM5_MAX_SIMPLEX_SIZE 5
 #define DIM5_MAX_AMBIENT_VERTICES 10
+#define COMBINED_CWS_TIMING_TOP_N 5
 
 typedef struct {
   int id;
@@ -68,11 +71,45 @@ typedef struct {
   PolyPointList *DP;
 } CWSPrintWorkspace;
 
+typedef struct {
+  unsigned long long candidate_index;
+  double total_seconds;
+  double make_cws_points_seconds;
+  double ip_check_seconds;
+  double complete_poly_seconds;
+  int ip_success;
+} CombinedCWSTimingEntry;
+
+typedef struct {
+  int enabled;
+  unsigned long long candidate_count;
+  unsigned long long ip_success_count;
+  unsigned long long complete_poly_call_count;
+  unsigned long long current_candidate_index;
+  unsigned long long max_make_cws_points_candidate;
+  unsigned long long max_ip_check_candidate;
+  unsigned long long max_complete_poly_candidate;
+  unsigned long long max_total_candidate;
+  double current_make_cws_points_seconds;
+  double current_ip_check_seconds;
+  double current_complete_poly_seconds;
+  double make_cws_points_total_seconds;
+  double ip_check_total_seconds;
+  double complete_poly_total_seconds;
+  double selected_stage_total_seconds;
+  double max_make_cws_points_seconds;
+  double max_ip_check_seconds;
+  double max_complete_poly_seconds;
+  double max_total_candidate_seconds;
+  CombinedCWSTimingEntry slowest[COMBINED_CWS_TIMING_TOP_N];
+} CombinedCWSTimingState;
+
 static Dim5RuntimeOptions gDim5RuntimeOptions = {1, 0};
 static CWSPrintWorkspace gCWSPrintWorkspace = {NULL, NULL};
 static int gCombinedCWSIPOnly = 0;
+static CombinedCWSTimingState gCombinedCWSTiming = {0};
 
-#define OSL (33) /* opt_string's length */
+#define OSL (36) /* opt_string's length */
 
 void PrintCWSUsage(char *c) {
   int i;
@@ -116,6 +153,9 @@ void PrintCWSUsage(char *c) {
       "          -I       for -c# stop after IP_Check and print IP CWS only",
       "                   without constructing dual/reflexivity data;",
       "                   run a later pass if reflexivity is needed.",
+      "          -T       collect combined-CWS timing summaries for",
+      "                   Make_CWS_Points, IP_Check and Complete_Poly;",
+      "                   report aggregates and slowest candidates to stderr.",
       "          -d#      compute basic IP weight systems for #-dimensional",
       "                   reflexive Gorenstein cones;",
       "              -r#  specifies the index as #/2.",
@@ -142,6 +182,18 @@ static void ValidateDim5RuntimeOptions(void);
 static int Dim5RuntimeOptionsModified(void);
 static void ResetCombinedCWSRuntimeOptions(void);
 static void EnableCombinedCWSIPOnlyMode(void);
+static void ResetCombinedCWSTimingMode(void);
+static void EnableCombinedCWSTimingMode(void);
+static void ResetCombinedCWSTimingStats(void);
+static double CombinedCWSTimingNowSeconds(void);
+static void CombinedCWSTimingBeginCandidate(void);
+static void CombinedCWSTimingRecordMakeCWSPoints(double seconds);
+static void CombinedCWSTimingRecordIPCheck(double seconds);
+static void CombinedCWSTimingFinalizeCandidate(int ip_success);
+static void PrintCombinedCWSTimingSummary(void);
+
+int CombinedCWSTimingEnabled(void);
+void CombinedCWSTimingAddCompletePolySeconds(double seconds);
 
 int Read_Weight(Weight *);
 
@@ -831,6 +883,7 @@ void Init_IP_CWS(int narg, char *fn[]) {
 
   ResetDim5RuntimeOptions();
   ResetCombinedCWSRuntimeOptions();
+  ResetCombinedCWSTimingMode();
   if (narg > 2)
     if (c[0] == 0)
       c = fn[++n];
@@ -869,11 +922,15 @@ void Init_IP_CWS(int narg, char *fn[]) {
       ParseDim5ShardIndexOption(c);
     } else if ((fn[n][0] == '-') && (fn[n][1] == 'I') && (fn[n][2] == 0))
       EnableCombinedCWSIPOnlyMode();
+    else if ((fn[n][0] == '-') && (fn[n][1] == 'T') && (fn[n][2] == 0))
+      EnableCombinedCWSTimingMode();
     else
       Die("illegal option after -c#");
   }
   if (Dim5RuntimeOptionsModified() && (d != 5))
     Die("-j# and -k# are only implemented for -c5");
+  if (gCombinedCWSTiming.enabled && !nop)
+    Die("-T is only implemented for combined CWS runs via -c# -n...");
   if (nop)
     Make_IP_CWS(narg, fn);
   else if (d <= 4) {
@@ -2058,6 +2115,215 @@ static void EnableCombinedCWSIPOnlyMode(void) {
   gCombinedCWSIPOnly = 1;
 }
 
+static void ResetCombinedCWSTimingMode(void) {
+  CombinedCWSTimingState empty = {0};
+
+  gCombinedCWSTiming = empty;
+}
+
+static void EnableCombinedCWSTimingMode(void) {
+  gCombinedCWSTiming.enabled = 1;
+}
+
+static void ResetCombinedCWSTimingStats(void) {
+  int enabled = gCombinedCWSTiming.enabled;
+  CombinedCWSTimingState empty = {0};
+
+  empty.enabled = enabled;
+  gCombinedCWSTiming = empty;
+}
+
+static double CombinedCWSTimingNowSeconds(void) {
+  struct timespec now;
+
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+    return 0.0;
+  return (double)now.tv_sec + 1.0e-9 * (double)now.tv_nsec;
+}
+
+int CombinedCWSTimingEnabled(void) {
+  return gCombinedCWSTiming.enabled;
+}
+
+static void CombinedCWSTimingInsertSlowest(
+    const CombinedCWSTimingEntry *entry) {
+  int i, pos = COMBINED_CWS_TIMING_TOP_N;
+
+  if (entry->total_seconds <= 0.0)
+    return;
+  for (i = 0; i < COMBINED_CWS_TIMING_TOP_N; i++)
+    if (entry->total_seconds > gCombinedCWSTiming.slowest[i].total_seconds) {
+      pos = i;
+      break;
+    }
+  if (pos == COMBINED_CWS_TIMING_TOP_N)
+    return;
+  for (i = COMBINED_CWS_TIMING_TOP_N - 1; i > pos; i--)
+    gCombinedCWSTiming.slowest[i] = gCombinedCWSTiming.slowest[i - 1];
+  gCombinedCWSTiming.slowest[pos] = *entry;
+}
+
+static void CombinedCWSTimingBeginCandidate(void) {
+  if (!gCombinedCWSTiming.enabled)
+    return;
+  gCombinedCWSTiming.candidate_count++;
+  gCombinedCWSTiming.current_candidate_index = gCombinedCWSTiming.candidate_count;
+  gCombinedCWSTiming.current_make_cws_points_seconds = 0.0;
+  gCombinedCWSTiming.current_ip_check_seconds = 0.0;
+  gCombinedCWSTiming.current_complete_poly_seconds = 0.0;
+}
+
+static void CombinedCWSTimingRecordMakeCWSPoints(double seconds) {
+  if (!gCombinedCWSTiming.enabled)
+    return;
+  gCombinedCWSTiming.current_make_cws_points_seconds = seconds;
+  gCombinedCWSTiming.make_cws_points_total_seconds += seconds;
+  if (seconds > gCombinedCWSTiming.max_make_cws_points_seconds) {
+    gCombinedCWSTiming.max_make_cws_points_seconds = seconds;
+    gCombinedCWSTiming.max_make_cws_points_candidate =
+        gCombinedCWSTiming.current_candidate_index;
+  }
+}
+
+static void CombinedCWSTimingRecordIPCheck(double seconds) {
+  if (!gCombinedCWSTiming.enabled)
+    return;
+  gCombinedCWSTiming.current_ip_check_seconds = seconds;
+  gCombinedCWSTiming.ip_check_total_seconds += seconds;
+  if (seconds > gCombinedCWSTiming.max_ip_check_seconds) {
+    gCombinedCWSTiming.max_ip_check_seconds = seconds;
+    gCombinedCWSTiming.max_ip_check_candidate =
+        gCombinedCWSTiming.current_candidate_index;
+  }
+}
+
+void CombinedCWSTimingAddCompletePolySeconds(double seconds) {
+  if (!gCombinedCWSTiming.enabled)
+    return;
+  gCombinedCWSTiming.complete_poly_call_count++;
+  gCombinedCWSTiming.current_complete_poly_seconds += seconds;
+  gCombinedCWSTiming.complete_poly_total_seconds += seconds;
+  if (gCombinedCWSTiming.current_complete_poly_seconds >
+      gCombinedCWSTiming.max_complete_poly_seconds) {
+    gCombinedCWSTiming.max_complete_poly_seconds =
+        gCombinedCWSTiming.current_complete_poly_seconds;
+    gCombinedCWSTiming.max_complete_poly_candidate =
+        gCombinedCWSTiming.current_candidate_index;
+  }
+}
+
+static void CombinedCWSTimingFinalizeCandidate(int ip_success) {
+  CombinedCWSTimingEntry entry;
+  double total_seconds;
+
+  if (!gCombinedCWSTiming.enabled)
+    return;
+  if (ip_success)
+    gCombinedCWSTiming.ip_success_count++;
+
+  total_seconds = gCombinedCWSTiming.current_make_cws_points_seconds +
+                  gCombinedCWSTiming.current_ip_check_seconds +
+                  gCombinedCWSTiming.current_complete_poly_seconds;
+  gCombinedCWSTiming.selected_stage_total_seconds += total_seconds;
+  if (total_seconds > gCombinedCWSTiming.max_total_candidate_seconds) {
+    gCombinedCWSTiming.max_total_candidate_seconds = total_seconds;
+    gCombinedCWSTiming.max_total_candidate =
+        gCombinedCWSTiming.current_candidate_index;
+  }
+
+  entry.candidate_index = gCombinedCWSTiming.current_candidate_index;
+  entry.total_seconds = total_seconds;
+  entry.make_cws_points_seconds =
+      gCombinedCWSTiming.current_make_cws_points_seconds;
+  entry.ip_check_seconds = gCombinedCWSTiming.current_ip_check_seconds;
+  entry.complete_poly_seconds =
+      gCombinedCWSTiming.current_complete_poly_seconds;
+  entry.ip_success = ip_success;
+  CombinedCWSTimingInsertSlowest(&entry);
+
+  gCombinedCWSTiming.current_candidate_index = 0;
+  gCombinedCWSTiming.current_make_cws_points_seconds = 0.0;
+  gCombinedCWSTiming.current_ip_check_seconds = 0.0;
+  gCombinedCWSTiming.current_complete_poly_seconds = 0.0;
+}
+
+static void PrintCombinedCWSTimingSummary(void) {
+  int i;
+  double candidate_count;
+  double ip_success_count;
+  double complete_poly_call_count;
+
+  if (!gCombinedCWSTiming.enabled)
+    return;
+
+  candidate_count = (double)gCombinedCWSTiming.candidate_count;
+  ip_success_count = (double)gCombinedCWSTiming.ip_success_count;
+  complete_poly_call_count = (double)gCombinedCWSTiming.complete_poly_call_count;
+
+  fprintf(stderr, "\n# combined-cws timing summary\n");
+  fprintf(stderr, "#   candidates             : %llu\n",
+          gCombinedCWSTiming.candidate_count);
+  fprintf(stderr, "#   ip successes           : %llu\n",
+          gCombinedCWSTiming.ip_success_count);
+  fprintf(stderr, "#   complete_poly calls    : %llu\n",
+          gCombinedCWSTiming.complete_poly_call_count);
+  fprintf(stderr,
+          "#   Make_CWS_Points total  : %.6f s avg/candidate %.3f ms max %.3f ms @ %llu\n",
+          gCombinedCWSTiming.make_cws_points_total_seconds,
+          candidate_count ?
+              (1000.0 * gCombinedCWSTiming.make_cws_points_total_seconds /
+               candidate_count) :
+              0.0,
+          1000.0 * gCombinedCWSTiming.max_make_cws_points_seconds,
+          gCombinedCWSTiming.max_make_cws_points_candidate);
+  fprintf(stderr,
+          "#   IP_Check total         : %.6f s avg/candidate %.3f ms max %.3f ms @ %llu\n",
+          gCombinedCWSTiming.ip_check_total_seconds,
+          candidate_count ?
+              (1000.0 * gCombinedCWSTiming.ip_check_total_seconds /
+               candidate_count) :
+              0.0,
+          1000.0 * gCombinedCWSTiming.max_ip_check_seconds,
+          gCombinedCWSTiming.max_ip_check_candidate);
+  fprintf(stderr,
+          "#   Complete_Poly total    : %.6f s avg/ip-success %.3f ms max %.3f ms @ %llu\n",
+          gCombinedCWSTiming.complete_poly_total_seconds,
+          ip_success_count ?
+              (1000.0 * gCombinedCWSTiming.complete_poly_total_seconds /
+               ip_success_count) :
+              0.0,
+          1000.0 * gCombinedCWSTiming.max_complete_poly_seconds,
+          gCombinedCWSTiming.max_complete_poly_candidate);
+  fprintf(stderr,
+          "#   Timed-stage total      : %.6f s avg/candidate %.3f ms max %.3f ms @ %llu\n",
+          gCombinedCWSTiming.selected_stage_total_seconds,
+          candidate_count ?
+              (1000.0 * gCombinedCWSTiming.selected_stage_total_seconds /
+               candidate_count) :
+              0.0,
+          1000.0 * gCombinedCWSTiming.max_total_candidate_seconds,
+          gCombinedCWSTiming.max_total_candidate);
+  if (complete_poly_call_count > 0.0)
+    fprintf(stderr,
+            "#   Complete_Poly avg/call : %.3f ms\n",
+            1000.0 * gCombinedCWSTiming.complete_poly_total_seconds /
+                complete_poly_call_count);
+
+  for (i = 0; i < COMBINED_CWS_TIMING_TOP_N; i++) {
+    CombinedCWSTimingEntry *entry = &gCombinedCWSTiming.slowest[i];
+
+    if (entry->total_seconds <= 0.0)
+      break;
+    fprintf(stderr,
+            "#   slowest[%d] candidate %llu total %.3f ms (points %.3f ms, ip %.3f ms, complete %.3f ms, ip=%d)\n",
+            i + 1, entry->candidate_index, 1000.0 * entry->total_seconds,
+            1000.0 * entry->make_cws_points_seconds,
+            1000.0 * entry->ip_check_seconds,
+            1000.0 * entry->complete_poly_seconds, entry->ip_success);
+  }
+  fflush(stderr);
+}
+
 static int Dim5RuntimeOptionsModified(void) {
   return (gDim5RuntimeOptions.shard_count != 1) ||
          (gDim5RuntimeOptions.shard_index != 0);
@@ -2312,6 +2578,9 @@ void PRINT_CWS(CWS *CW) {
     PolyPointList *P, *DP;
     EqList E;
     VertexNumList V;
+    int ip_is_ok;
+    int timing_enabled;
+    double stage_start = 0.0;
 
     if (gCWSPrintWorkspace.P == NULL) {
       gCWSPrintWorkspace.P =
@@ -2321,13 +2590,26 @@ void PRINT_CWS(CWS *CW) {
     }
     P = gCWSPrintWorkspace.P;
     DP = gCWSPrintWorkspace.DP;
+    timing_enabled = CombinedCWSTimingEnabled();
+    CombinedCWSTimingBeginCandidate();
     CW->index = 1;
+    if (timing_enabled)
+      stage_start = CombinedCWSTimingNowSeconds();
     Make_CWS_Points(CW, P);
-    if (IP_Check(P, &V, &E)) {
+    if (timing_enabled)
+      CombinedCWSTimingRecordMakeCWSPoints(
+          CombinedCWSTimingNowSeconds() - stage_start);
+    if (timing_enabled)
+      stage_start = CombinedCWSTimingNowSeconds();
+    ip_is_ok = IP_Check(P, &V, &E);
+    if (timing_enabled)
+      CombinedCWSTimingRecordIPCheck(CombinedCWSTimingNowSeconds() - stage_start);
+    if (ip_is_ok) {
       int r = 1, i = -1;
       Print_CWS(CW);
       if (gCombinedCWSIPOnly) {
         fprintf(outFILE, "\n");
+        CombinedCWSTimingFinalizeCandidate(1);
         return;
       }
       if (gCWSPrintWorkspace.DP == NULL) {
@@ -2351,7 +2633,9 @@ void PRINT_CWS(CWS *CW) {
         fprintf(outFILE, " F:%d N:%d", E.ne, DP->np);
       assert(IP_Check(DP, &V, &E));
       fprintf(outFILE, "\n");
-    }
+      CombinedCWSTimingFinalizeCandidate(1);
+    } else
+      CombinedCWSTimingFinalizeCandidate(0);
   }
 #endif
 }
@@ -3260,6 +3544,8 @@ void Make_IP_CWS(int narg, char *fn[]) {
       ParseDim5ShardIndexOption(a);
     } else if ((fn[n][1] == 'I') && (fn[n][2] == 0)) {
       EnableCombinedCWSIPOnlyMode();
+    } else if ((fn[n][1] == 'T') && (fn[n][2] == 0)) {
+      EnableCombinedCWSTimingMode();
     } else
       Die("illegal option in -c# invocation");
   }
@@ -3286,6 +3572,7 @@ void Make_IP_CWS(int narg, char *fn[]) {
     if ((INFILE[i] = fopen(infile[i], "r")) == NULL)
       Die("Unable to open infile to read");
   }
+  ResetCombinedCWSTimingStats();
   if (structure_id) {
     Dim5WeightPool input_pools[NFmax] = {{0}};
     Dim5WeightPool selection_pools[NFmax] = {{0}};
@@ -3417,6 +3704,7 @@ void Make_IP_CWS(int narg, char *fn[]) {
     if (AUXFILE[i] != NULL)
       fclose(AUXFILE[i]);
   }
+  PrintCombinedCWSTimingSummary();
 }
 
 /*  ==========  	      POLY DATA:                	==========  */

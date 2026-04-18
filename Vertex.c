@@ -1,5 +1,19 @@
+#include <time.h>
+
 #include "Global.h"
 #include "Rat.h"
+
+int CombinedCWSTimingEnabled(void) __attribute__((weak));
+void CombinedCWSTimingAddCompletePolySeconds(double seconds)
+    __attribute__((weak));
+
+static double CompletePolyTimingNowSeconds(void) {
+  struct timespec now;
+
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+    return 0.0;
+  return (double)now.tv_sec + 1.0e-9 * (double)now.tv_nsec;
+}
 
 #define MAX_BAD_EQ (POLY_Dmax > 5) /* previously 6; needed for nef !? */
 #define SHOW_NEW_CEq                                                           \
@@ -1315,11 +1329,18 @@ void Compute_InvMat(int n, EqList *_E, int OrdFac[VERT_Nmax],
 
 void Complete_Poly(PairMat VPM, EqList *_E, int nv, PolyPointList *_CP) {
   int i, j, k, InsPoint, n = _CP->n, old_np = _CP->np;
+  int timing_enabled = 0;
   Long MaxDist[EQUA_Nmax], InvMat[POLY_Dmax][POLY_Dmax], Den = 1;
+  double timing_start = 0.0;
   Long yDen[POLY_Dmax];
   int OrdFac[VERT_Nmax], BasFac[POLY_Dmax], position[POLY_Dmax];
 
   /*_CP->np=0;*/
+
+  if ((CombinedCWSTimingEnabled != NULL) && CombinedCWSTimingEnabled()) {
+    timing_enabled = 1;
+    timing_start = CompletePolyTimingNowSeconds();
+  }
 
   /* Calculate maximal distances from facets of Delta^* (Vertices of Delta) */
 
@@ -1383,6 +1404,9 @@ void Complete_Poly(PairMat VPM, EqList *_E, int nv, PolyPointList *_CP) {
         yDen[i] -= MaxDist[BasFac[k]] * InvMat[i][k];
     }
   }
+  if (timing_enabled && (CombinedCWSTimingAddCompletePolySeconds != NULL))
+    CombinedCWSTimingAddCompletePolySeconds(
+        CompletePolyTimingNowSeconds() - timing_start);
 }
 
 /*  ======================================================================  */
