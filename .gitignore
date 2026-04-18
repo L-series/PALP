@@ -3,3 +3,6 @@
 # are created as intermediate build products.
 *.x
 *.o
+
+# Local benchmark corpora and derived PALP outputs
+cws/
