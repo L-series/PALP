@@ -70,8 +70,9 @@ typedef struct {
 
 static Dim5RuntimeOptions gDim5RuntimeOptions = {1, 0};
 static CWSPrintWorkspace gCWSPrintWorkspace = {NULL, NULL};
+static int gCombinedCWSIPOnly = 0;
 
-#define OSL (30) /* opt_string's length */
+#define OSL (33) /* opt_string's length */
 
 void PrintCWSUsage(char *c) {
   int i;
@@ -112,6 +113,9 @@ void PrintCWSUsage(char *c) {
       "entry  ",
       "                   F:f and no v for N indicates a non-reflexive `dual "
       "pair'.",
+      "          -I       for -c# stop after IP_Check and print IP CWS only",
+      "                   without constructing dual/reflexivity data;",
+      "                   run a later pass if reflexivity is needed.",
       "          -d#      compute basic IP weight systems for #-dimensional",
       "                   reflexive Gorenstein cones;",
       "              -r#  specifies the index as #/2.",
@@ -136,6 +140,8 @@ static void ParseDim5ShardCountOption(const char *value);
 static void ParseDim5ShardIndexOption(const char *value);
 static void ValidateDim5RuntimeOptions(void);
 static int Dim5RuntimeOptionsModified(void);
+static void ResetCombinedCWSRuntimeOptions(void);
+static void EnableCombinedCWSIPOnlyMode(void);
 
 int Read_Weight(Weight *);
 
@@ -824,6 +830,7 @@ void Init_IP_CWS(int narg, char *fn[]) {
   char *c = &fn[1][2];
 
   ResetDim5RuntimeOptions();
+  ResetCombinedCWSRuntimeOptions();
   if (narg > 2)
     if (c[0] == 0)
       c = fn[++n];
@@ -860,7 +867,9 @@ void Init_IP_CWS(int narg, char *fn[]) {
       else
         c = &fn[n][2];
       ParseDim5ShardIndexOption(c);
-    } else
+    } else if ((fn[n][0] == '-') && (fn[n][1] == 'I') && (fn[n][2] == 0))
+      EnableCombinedCWSIPOnlyMode();
+    else
       Die("illegal option after -c#");
   }
   if (Dim5RuntimeOptionsModified() && (d != 5))
@@ -2041,6 +2050,14 @@ static void ResetDim5RuntimeOptions(void) {
   gDim5RuntimeOptions.shard_index = 0;
 }
 
+static void ResetCombinedCWSRuntimeOptions(void) {
+  gCombinedCWSIPOnly = 0;
+}
+
+static void EnableCombinedCWSIPOnlyMode(void) {
+  gCombinedCWSIPOnly = 1;
+}
+
 static int Dim5RuntimeOptionsModified(void) {
   return (gDim5RuntimeOptions.shard_count != 1) ||
          (gDim5RuntimeOptions.shard_index != 0);
@@ -2302,16 +2319,6 @@ void PRINT_CWS(CWS *CW) {
       if (gCWSPrintWorkspace.P == NULL)
         Die("Unable to allocate space for P");
     }
-    if (gCWSPrintWorkspace.DP == NULL) {
-      gCWSPrintWorkspace.DP =
-          (PolyPointList *)malloc(sizeof(PolyPointList));
-      if (gCWSPrintWorkspace.DP == NULL) {
-        free(gCWSPrintWorkspace.P);
-        gCWSPrintWorkspace.P = NULL;
-        Die("Unable to allocate space for DP");
-      }
-    }
-
     P = gCWSPrintWorkspace.P;
     DP = gCWSPrintWorkspace.DP;
     CW->index = 1;
@@ -2319,6 +2326,20 @@ void PRINT_CWS(CWS *CW) {
     if (IP_Check(P, &V, &E)) {
       int r = 1, i = -1;
       Print_CWS(CW);
+      if (gCombinedCWSIPOnly) {
+        fprintf(outFILE, "\n");
+        return;
+      }
+      if (gCWSPrintWorkspace.DP == NULL) {
+        gCWSPrintWorkspace.DP =
+            (PolyPointList *)malloc(sizeof(PolyPointList));
+        if (gCWSPrintWorkspace.DP == NULL) {
+          free(gCWSPrintWorkspace.P);
+          gCWSPrintWorkspace.P = NULL;
+          Die("Unable to allocate space for DP");
+        }
+      }
+      DP = gCWSPrintWorkspace.DP;
       while (r && (++i < E.ne))
         if (E.e[i].c != 1)
           r = 0;
@@ -3237,6 +3258,8 @@ void Make_IP_CWS(int narg, char *fn[]) {
       else
         a = &fn[n][2];
       ParseDim5ShardIndexOption(a);
+    } else if ((fn[n][1] == 'I') && (fn[n][2] == 0)) {
+      EnableCombinedCWSIPOnlyMode();
     } else
       Die("illegal option in -c# invocation");
   }
