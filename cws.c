@@ -1,4 +1,7 @@
+#include <errno.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "Global.h"
 #include "LG.h"
@@ -21,6 +24,7 @@ typedef struct {
 #define DIM5_MAX_ARITY 5
 #define DIM5_MAX_SIMPLEX_SIZE 5
 #define DIM5_MAX_AMBIENT_VERTICES 10
+#define DIM5_CACHE_PATH_MAX 4096
 #define COMBINED_CWS_TIMING_TOP_N 5
 
 typedef struct {
@@ -101,6 +105,16 @@ typedef struct {
   double max_ip_check_seconds;
   double max_complete_poly_seconds;
   double max_total_candidate_seconds;
+  unsigned long long x0_fail_count;
+  unsigned long long seed_interval_empty_count;
+  unsigned long long tighten_interval_empty_count;
+  unsigned long long zero_range_fail_count;
+  unsigned long long seed_singleton_count;
+  unsigned long long tighten_singleton_count;
+  unsigned long long singleton_remaining_constraint_count;
+  unsigned long long zero_constraint_count;
+  unsigned long long nonzero_constraint_count;
+  unsigned long long skipped_constraint_count;
   CombinedCWSTimingEntry slowest[COMBINED_CWS_TIMING_TOP_N];
 } CombinedCWSTimingState;
 
@@ -189,6 +203,18 @@ static double CombinedCWSTimingNowSeconds(void);
 static void CombinedCWSTimingBeginCandidate(void);
 static void CombinedCWSTimingRecordMakeCWSPoints(double seconds);
 static void CombinedCWSTimingRecordIPCheck(double seconds);
+void CombinedCWSTimingAddMakeCWSPointsBranchStats(
+  unsigned long long x0_fail_count,
+  unsigned long long seed_interval_empty_count,
+  unsigned long long tighten_interval_empty_count,
+  unsigned long long zero_range_fail_count,
+  unsigned long long seed_singleton_count,
+  unsigned long long tighten_singleton_count,
+  unsigned long long singleton_remaining_constraint_count,
+  unsigned long long zero_constraint_count,
+  unsigned long long nonzero_constraint_count,
+  unsigned long long skipped_constraint_count)
+  __attribute__((no_instrument_function));
 static void CombinedCWSTimingFinalizeCandidate(int ip_success);
 static void PrintCombinedCWSTimingSummary(void);
 
@@ -2212,6 +2238,35 @@ void CombinedCWSTimingAddCompletePolySeconds(double seconds) {
   }
 }
 
+void CombinedCWSTimingAddMakeCWSPointsBranchStats(
+    unsigned long long x0_fail_count,
+    unsigned long long seed_interval_empty_count,
+    unsigned long long tighten_interval_empty_count,
+    unsigned long long zero_range_fail_count,
+    unsigned long long seed_singleton_count,
+    unsigned long long tighten_singleton_count,
+    unsigned long long singleton_remaining_constraint_count,
+    unsigned long long zero_constraint_count,
+    unsigned long long nonzero_constraint_count,
+    unsigned long long skipped_constraint_count) {
+  if (!gCombinedCWSTiming.enabled)
+    return;
+
+  gCombinedCWSTiming.x0_fail_count += x0_fail_count;
+  gCombinedCWSTiming.seed_interval_empty_count +=
+      seed_interval_empty_count;
+  gCombinedCWSTiming.tighten_interval_empty_count +=
+      tighten_interval_empty_count;
+  gCombinedCWSTiming.zero_range_fail_count += zero_range_fail_count;
+  gCombinedCWSTiming.seed_singleton_count += seed_singleton_count;
+  gCombinedCWSTiming.tighten_singleton_count += tighten_singleton_count;
+  gCombinedCWSTiming.singleton_remaining_constraint_count +=
+      singleton_remaining_constraint_count;
+  gCombinedCWSTiming.zero_constraint_count += zero_constraint_count;
+  gCombinedCWSTiming.nonzero_constraint_count += nonzero_constraint_count;
+  gCombinedCWSTiming.skipped_constraint_count += skipped_constraint_count;
+}
+
 static void CombinedCWSTimingFinalizeCandidate(int ip_success) {
   CombinedCWSTimingEntry entry;
   double total_seconds;
@@ -2252,6 +2307,7 @@ static void PrintCombinedCWSTimingSummary(void) {
   double candidate_count;
   double ip_success_count;
   double complete_poly_call_count;
+  unsigned long long total_branch_prunes;
 
   if (!gCombinedCWSTiming.enabled)
     return;
@@ -2259,6 +2315,10 @@ static void PrintCombinedCWSTimingSummary(void) {
   candidate_count = (double)gCombinedCWSTiming.candidate_count;
   ip_success_count = (double)gCombinedCWSTiming.ip_success_count;
   complete_poly_call_count = (double)gCombinedCWSTiming.complete_poly_call_count;
+  total_branch_prunes = gCombinedCWSTiming.x0_fail_count +
+                        gCombinedCWSTiming.seed_interval_empty_count +
+                        gCombinedCWSTiming.tighten_interval_empty_count +
+                        gCombinedCWSTiming.zero_range_fail_count;
 
   fprintf(stderr, "\n# combined-cws timing summary\n");
   fprintf(stderr, "#   candidates             : %llu\n",
@@ -2308,6 +2368,24 @@ static void PrintCombinedCWSTimingSummary(void) {
             "#   Complete_Poly avg/call : %.3f ms\n",
             1000.0 * gCombinedCWSTiming.complete_poly_total_seconds /
                 complete_poly_call_count);
+          fprintf(stderr,
+            "#   Branch prunes         : %llu total (x0=%llu, seed-empty=%llu, tighten-empty=%llu, zero-range=%llu)\n",
+            total_branch_prunes, gCombinedCWSTiming.x0_fail_count,
+            gCombinedCWSTiming.seed_interval_empty_count,
+            gCombinedCWSTiming.tighten_interval_empty_count,
+            gCombinedCWSTiming.zero_range_fail_count);
+          fprintf(stderr,
+            "#   Singleton branches    : %llu total (seed=%llu, tighten=%llu, remaining-constraints=%llu)\n",
+            gCombinedCWSTiming.seed_singleton_count +
+                gCombinedCWSTiming.tighten_singleton_count,
+            gCombinedCWSTiming.seed_singleton_count,
+            gCombinedCWSTiming.tighten_singleton_count,
+            gCombinedCWSTiming.singleton_remaining_constraint_count);
+          fprintf(stderr,
+            "#   Tighten checks        : nonzero=%llu zero=%llu skipped=%llu\n",
+            gCombinedCWSTiming.nonzero_constraint_count,
+            gCombinedCWSTiming.zero_constraint_count,
+            gCombinedCWSTiming.skipped_constraint_count);
 
   for (i = 0; i < COMBINED_CWS_TIMING_TOP_N; i++) {
     CombinedCWSTimingEntry *entry = &gCombinedCWSTiming.slowest[i];
@@ -2508,6 +2586,248 @@ static void LoadDim5BasePoolFromFile(FILE *input, Dim5WeightPool *pool) {
   rewind(input);
 }
 
+static void WriteDim5WeightEntry(FILE *output, const Dim5WeightEntry *entry) {
+  int i;
+
+  fprintf(output, "%d ", entry->d);
+  for (i = 0; i < entry->N; i++)
+    fprintf(output, " %d", (int)entry->w[i]);
+  fprintf(output, "\n");
+}
+
+static const char *Dim5CacheDirectory(void) {
+  const char *cache_dir = getenv("PALP_DIM5_CACHE_DIR");
+
+  if ((cache_dir == NULL) || (*cache_dir == 0))
+    cache_dir = ".palp-dim5-cache";
+  return cache_dir;
+}
+
+static int EnsureDim5CacheDirectoryExists(void) {
+  const char *cache_dir = Dim5CacheDirectory();
+  struct stat cache_dir_info;
+
+  if (stat(cache_dir, &cache_dir_info) == 0)
+    return S_ISDIR(cache_dir_info.st_mode);
+
+  if (mkdir(cache_dir, 0777) == 0)
+    return 1;
+
+  if ((errno == EEXIST) && (stat(cache_dir, &cache_dir_info) == 0))
+    return S_ISDIR(cache_dir_info.st_mode);
+
+  return 0;
+}
+
+static int BuildDim5CachePath(char *path, size_t path_size,
+                              const char *file_name) {
+  int needed;
+
+  if (!EnsureDim5CacheDirectoryExists())
+    return 0;
+
+  needed = snprintf(path, path_size, "%s/%s", Dim5CacheDirectory(), file_name);
+  return (needed > 0) && ((size_t)needed < path_size);
+}
+
+static int LoadDim5WeightPoolFromPath(const char *path, Dim5WeightPool *pool) {
+  FILE *input = fopen(path, "r");
+  Dim5WeightPool cached_pool;
+
+  if (input == NULL)
+    return 0;
+
+  InitDim5WeightPool(&cached_pool);
+  LoadDim5BasePoolFromFile(input, &cached_pool);
+  fclose(input);
+  if (cached_pool.count == 0) {
+    FreeDim5WeightPool(&cached_pool);
+    return 0;
+  }
+
+  *pool = cached_pool;
+  return 1;
+}
+
+static int PersistDim5WeightPoolToPath(const char *path,
+                                       const Dim5WeightPool *pool) {
+  FILE *output;
+  char temp_path[DIM5_CACHE_PATH_MAX];
+  long i;
+  int needed;
+
+  if (pool->count == 0)
+    return 0;
+
+  needed = snprintf(temp_path, sizeof(temp_path), "%s.tmp.%ld.%ld", path,
+                    (long)getpid(), (long)time(NULL));
+  if ((needed <= 0) || ((size_t)needed >= sizeof(temp_path)))
+    return 0;
+
+  output = fopen(temp_path, "w");
+  if (output == NULL)
+    return 0;
+
+  for (i = 0; i < pool->count; i++)
+    WriteDim5WeightEntry(output, &pool->items[i]);
+
+  if (fclose(output) != 0) {
+    remove(temp_path);
+    return 0;
+  }
+
+  if (rename(temp_path, path) != 0) {
+    remove(temp_path);
+    return 0;
+  }
+
+  return 1;
+}
+
+static int BuildDim5BuiltinBasePoolCachePath(int simplex_size, char *path,
+                                             size_t path_size) {
+  char file_name[128];
+  int needed;
+
+  needed = snprintf(file_name, sizeof(file_name),
+                    "dim5-v1-builtin-simplex%d-base.weights", simplex_size);
+  if ((needed <= 0) || ((size_t)needed >= sizeof(file_name)))
+    return 0;
+
+  return BuildDim5CachePath(path, path_size, file_name);
+}
+
+static int BuildDim5BuiltinSelectionCachePath(int simplex_size, int shared_count,
+                                              char *path, size_t path_size) {
+  char file_name[128];
+  int needed;
+
+  needed = snprintf(file_name, sizeof(file_name),
+                    "dim5-v1-builtin-simplex%d-shared%d.weights",
+                    simplex_size, shared_count);
+  if ((needed <= 0) || ((size_t)needed >= sizeof(file_name)))
+    return 0;
+
+  return BuildDim5CachePath(path, path_size, file_name);
+}
+
+static unsigned long long UpdateDim5CacheHash(unsigned long long hash,
+                                              const void *data,
+                                              size_t data_size) {
+  const unsigned char *bytes = (const unsigned char *)data;
+  size_t i;
+
+  for (i = 0; i < data_size; i++) {
+    hash ^= (unsigned long long)bytes[i];
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
+static int BuildDim5InputSelectionCachePath(const char *input_path,
+                                            int shared_count, char *path,
+                                            size_t path_size) {
+  struct stat input_info;
+  unsigned long long hash = 1469598103934665603ULL;
+  char file_name[128];
+  int needed;
+
+  hash = UpdateDim5CacheHash(hash, input_path, strlen(input_path));
+  hash = UpdateDim5CacheHash(hash, &shared_count, sizeof(shared_count));
+  if (stat(input_path, &input_info) == 0) {
+    unsigned long long file_size = (unsigned long long)input_info.st_size;
+    unsigned long long file_mtime = (unsigned long long)input_info.st_mtime;
+
+    hash = UpdateDim5CacheHash(hash, &file_size, sizeof(file_size));
+    hash = UpdateDim5CacheHash(hash, &file_mtime, sizeof(file_mtime));
+  }
+
+  needed = snprintf(file_name, sizeof(file_name),
+                    "dim5-v1-input-%016llx-shared%d.weights", hash,
+                    shared_count);
+  if ((needed <= 0) || ((size_t)needed >= sizeof(file_name)))
+    return 0;
+
+  return BuildDim5CachePath(path, path_size, file_name);
+}
+
+static int LoadDim5BuiltinBasePoolFromCache(int simplex_size,
+                                            Dim5WeightPool *pool) {
+  char path[DIM5_CACHE_PATH_MAX];
+
+  if (!BuildDim5BuiltinBasePoolCachePath(simplex_size, path, sizeof(path)))
+    return 0;
+
+  return LoadDim5WeightPoolFromPath(path, pool);
+}
+
+static void PersistDim5BuiltinBasePoolToCache(int simplex_size,
+                                              const Dim5WeightPool *pool) {
+  char path[DIM5_CACHE_PATH_MAX];
+
+  if (!BuildDim5BuiltinBasePoolCachePath(simplex_size, path, sizeof(path)))
+    return;
+
+  PersistDim5WeightPoolToPath(path, pool);
+}
+
+static int LoadDim5BuiltinSelectionPoolFromCache(int simplex_size,
+                                                 int shared_count,
+                                                 Dim5WeightPool *pool) {
+  char path[DIM5_CACHE_PATH_MAX];
+
+  if (!BuildDim5BuiltinSelectionCachePath(simplex_size, shared_count, path,
+                                          sizeof(path)))
+    return 0;
+
+  return LoadDim5WeightPoolFromPath(path, pool);
+}
+
+static void PersistDim5BuiltinSelectionPoolToCache(int simplex_size,
+                                                   int shared_count,
+                                                   const Dim5WeightPool *pool) {
+  char path[DIM5_CACHE_PATH_MAX];
+
+  if (!BuildDim5BuiltinSelectionCachePath(simplex_size, shared_count, path,
+                                          sizeof(path)))
+    return;
+
+  PersistDim5WeightPoolToPath(path, pool);
+}
+
+static int LoadDim5InputSelectionPoolFromCache(const char *input_path,
+                                               int shared_count,
+                                               Dim5WeightPool *pool) {
+  char path[DIM5_CACHE_PATH_MAX];
+
+  if (!BuildDim5InputSelectionCachePath(input_path, shared_count, path,
+                                        sizeof(path)))
+    return 0;
+
+  return LoadDim5WeightPoolFromPath(path, pool);
+}
+
+static void PersistDim5InputSelectionPoolToCache(const char *input_path,
+                                                 int shared_count,
+                                                 const Dim5WeightPool *pool) {
+  char path[DIM5_CACHE_PATH_MAX];
+
+  if (!BuildDim5InputSelectionCachePath(input_path, shared_count, path,
+                                        sizeof(path)))
+    return;
+
+  PersistDim5WeightPoolToPath(path, pool);
+}
+
+static void BuildDim5SelectionPool(const Dim5WeightPool *base_pool,
+                                   int shared_count,
+                                   Dim5WeightPool *selection_pool) {
+  long i;
+
+  for (i = 0; i < base_pool->count; i++)
+    SelectDim5Weights(&base_pool->items[i], shared_count, selection_pool);
+}
+
 static void PopulateDim5BuiltinBasePool(Dim5WeightPool *pool,
                                         int simplex_size) {
   int i;
@@ -2557,6 +2877,9 @@ static void BuildDim5BuiltinBasePools(Dim5WeightPool base_pools[],
   if (!need_five_weights)
     return;
 
+  if (LoadDim5BuiltinBasePoolFromCache(5, &base_pools[5]))
+    return;
+
   if ((generated_five_weights = tmpfile()) == NULL)
     Die("Unable to open tmpfile for read/write");
   outFILE = generated_five_weights;
@@ -2565,6 +2888,7 @@ static void BuildDim5BuiltinBasePools(Dim5WeightPool base_pools[],
   rewind(generated_five_weights);
   LoadDim5BasePoolFromFile(generated_five_weights, &base_pools[5]);
   fclose(generated_five_weights);
+  PersistDim5BuiltinBasePoolToCache(5, &base_pools[5]);
 }
 
 void PRINT_CWS(CWS *CW) {
@@ -3399,12 +3723,18 @@ void Make_5_CWS(int structure_id) {
       int shared_count = descriptor->shared_counts[j];
 
       if (!selection_cache_ready[simplex_size][shared_count]) {
-        long k;
-
         InitDim5WeightPool(&selection_cache[simplex_size][shared_count]);
-        for (k = 0; k < base_pools[simplex_size].count; k++)
-          SelectDim5Weights(&base_pools[simplex_size].items[k], shared_count,
-                            &selection_cache[simplex_size][shared_count]);
+
+        if (!LoadDim5BuiltinSelectionPoolFromCache(
+                simplex_size, shared_count,
+                &selection_cache[simplex_size][shared_count])) {
+          BuildDim5SelectionPool(&base_pools[simplex_size], shared_count,
+                                 &selection_cache[simplex_size][shared_count]);
+          PersistDim5BuiltinSelectionPoolToCache(
+              simplex_size, shared_count,
+              &selection_cache[simplex_size][shared_count]);
+        }
+
         selection_cache_ready[simplex_size][shared_count] = 1;
       }
 
@@ -3615,10 +3945,17 @@ void Make_IP_CWS(int narg, char *fn[]) {
 
       if (selection_owner[i] == i) {
         InitDim5WeightPool(&selection_pools[i]);
-        for (j = 0; j < input_pools[input_owner[i]].count; j++)
-          SelectDim5Weights(&input_pools[input_owner[i]].items[j],
-                            descriptor->shared_counts[i],
-                            &selection_pools[i]);
+
+        if (!LoadDim5InputSelectionPoolFromCache(
+                infile[input_owner[i]], descriptor->shared_counts[i],
+                &selection_pools[i])) {
+          BuildDim5SelectionPool(&input_pools[input_owner[i]],
+                                 descriptor->shared_counts[i],
+                                 &selection_pools[i]);
+          PersistDim5InputSelectionPoolToCache(
+              infile[input_owner[i]], descriptor->shared_counts[i],
+              &selection_pools[i]);
+        }
       }
 
       AUXPOOL[i] = &selection_pools[selection_owner[i]];

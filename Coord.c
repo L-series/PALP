@@ -13,7 +13,97 @@ typedef struct {
 void Make_CWS_Points(CWS *_C, PolyPointList *_P);
 void Make_RGC_Points(CWS *Cin, PolyPointList *_P);
 void CWS_to_PermCWS(CWS *Cin, CWS *C, int *pi);
+Long PD_Floor(Long N, Long D);
 
+int PALPTraceActive(void) __attribute__((weak));
+void PALPTraceRecordRegionSample(const char *name, unsigned long long count,
+                                 double seconds) __attribute__((weak));
+void PALPTraceRecordPDFloorSample(const char *name, double seconds)
+    __attribute__((weak));
+int CombinedCWSTimingEnabled(void) __attribute__((weak));
+void CombinedCWSTimingAddMakeCWSPointsBranchStats(
+  unsigned long long x0_fail_count,
+  unsigned long long seed_interval_empty_count,
+  unsigned long long tighten_interval_empty_count,
+  unsigned long long zero_range_fail_count,
+  unsigned long long seed_singleton_count,
+  unsigned long long tighten_singleton_count,
+  unsigned long long singleton_remaining_constraint_count,
+  unsigned long long zero_constraint_count,
+  unsigned long long nonzero_constraint_count,
+  unsigned long long skipped_constraint_count) __attribute__((weak));
+
+static double CoordTraceNowSeconds(void) __attribute__((no_instrument_function));
+static void CoordTraceRecordRegionSummary(const char *name,
+                                          unsigned long long count,
+                                          double seconds)
+    __attribute__((no_instrument_function));
+static Long CoordTracePD_FloorSite(const char *site_name, int trace_enabled,
+                                   Long N, Long D)
+    __attribute__((no_instrument_function));
+static void CoordRecordMakeCWSPointsBranchStats(
+  unsigned long long x0_fail_count,
+  unsigned long long seed_interval_empty_count,
+  unsigned long long tighten_interval_empty_count,
+  unsigned long long zero_range_fail_count,
+  unsigned long long seed_singleton_count,
+  unsigned long long tighten_singleton_count,
+  unsigned long long singleton_remaining_constraint_count,
+  unsigned long long zero_constraint_count,
+  unsigned long long nonzero_constraint_count,
+  unsigned long long skipped_constraint_count)
+  __attribute__((no_instrument_function));
+
+static double CoordTraceNowSeconds(void) {
+  struct timespec now;
+
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+    return 0.0;
+  return (double)now.tv_sec + 1.0e-9 * (double)now.tv_nsec;
+}
+
+static void CoordTraceRecordRegionSummary(const char *name,
+                                          unsigned long long count,
+                                          double seconds) {
+  if ((PALPTraceRecordRegionSample == NULL) || (count == 0) || (seconds <= 0.0))
+    return;
+  PALPTraceRecordRegionSample(name, count, seconds);
+}
+
+static Long CoordTracePD_FloorSite(const char *site_name, int trace_enabled,
+                                   Long N, Long D) {
+  Long result;
+  double start_seconds;
+
+  if (!trace_enabled || (PALPTraceRecordPDFloorSample == NULL))
+    return PD_Floor(N, D);
+  start_seconds = CoordTraceNowSeconds();
+  result = PD_Floor(N, D);
+  PALPTraceRecordPDFloorSample(site_name,
+                               CoordTraceNowSeconds() - start_seconds);
+  return result;
+}
+
+static void CoordRecordMakeCWSPointsBranchStats(
+    unsigned long long x0_fail_count,
+    unsigned long long seed_interval_empty_count,
+    unsigned long long tighten_interval_empty_count,
+    unsigned long long zero_range_fail_count,
+    unsigned long long seed_singleton_count,
+    unsigned long long tighten_singleton_count,
+    unsigned long long singleton_remaining_constraint_count,
+    unsigned long long zero_constraint_count,
+    unsigned long long nonzero_constraint_count,
+    unsigned long long skipped_constraint_count) {
+  if (CombinedCWSTimingAddMakeCWSPointsBranchStats == NULL)
+    return;
+
+  CombinedCWSTimingAddMakeCWSPointsBranchStats(
+      x0_fail_count, seed_interval_empty_count, tighten_interval_empty_count,
+      zero_range_fail_count, seed_singleton_count, tighten_singleton_count,
+      singleton_remaining_constraint_count, zero_constraint_count,
+      nonzero_constraint_count, skipped_constraint_count);
+}
 /*  ==========  	  I/O functions:                	==========  */
 
 int IsNextDigit(void) {
@@ -1042,23 +1132,102 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
   CWS *_C = Cin;
   CWLatticeBasis B;
   Long G[POLY_Dmax][POLY_Dmax], M[POLY_Dmax];
+  int trace_enabled = (PALPTraceActive != NULL) && PALPTraceActive();
+  int timing_enabled =
+      (CombinedCWSTimingEnabled != NULL) && CombinedCWSTimingEnabled();
+  double trace_make_basis_seconds = 0.0;
+  double trace_compute_x0_seconds = 0.0;
+  double trace_build_amin_seconds = 0.0;
+  double trace_compute_xmax_seconds = 0.0;
+  double trace_init_last_bounds_seconds = 0.0;
+  double trace_enumeration_total_seconds = 0.0;
+  double trace_enum_backtrack_seconds = 0.0;
+  double trace_enum_seed_bounds_seconds = 0.0;
+  double trace_enum_tighten_bounds_seconds = 0.0;
+  double trace_enum_post_tighten_seconds = 0.0;
+  double trace_enum_emit_points_seconds = 0.0;
+  double trace_sublat_z_seconds = 0.0;
+  double trace_reduce_ppl_seconds = 0.0;
+  unsigned long long branch_x0_fail_count = 0;
+  unsigned long long branch_seed_interval_empty_count = 0;
+  unsigned long long branch_tighten_interval_empty_count = 0;
+  unsigned long long branch_zero_range_fail_count = 0;
+  unsigned long long branch_seed_singleton_count = 0;
+  unsigned long long branch_tighten_singleton_count = 0;
+  unsigned long long branch_singleton_remaining_constraint_count = 0;
+  unsigned long long branch_zero_constraint_count = 0;
+  unsigned long long branch_nonzero_constraint_count = 0;
+  unsigned long long branch_skipped_constraint_count = 0;
+  unsigned long long trace_make_basis_count = 0;
+  unsigned long long trace_compute_x0_count = 0;
+  unsigned long long trace_build_amin_count = 0;
+  unsigned long long trace_compute_xmax_count = 0;
+  unsigned long long trace_init_last_bounds_count = 0;
+  unsigned long long trace_enumeration_total_count = 0;
+  unsigned long long trace_enum_backtrack_count = 0;
+  unsigned long long trace_enum_seed_bounds_count = 0;
+  unsigned long long trace_enum_tighten_bounds_count = 0;
+  unsigned long long trace_enum_post_tighten_count = 0;
+  unsigned long long trace_enum_emit_points_count = 0;
+  unsigned long long trace_sublat_z_count = 0;
+  unsigned long long trace_reduce_ppl_count = 0;
 #ifndef NO_COORD_IMPROVEMENT /* ==== Perm Coord Improvement ==== */
   int pi[AMBI_Dmax];
   CWS Caux;
   _C = &Caux;
   CWS_to_PermCWS(Cin, _C, pi);
 #endif                       /* = End of Perm Coord Improvement = */
-  Make_CWS_Basis(_C, &B);    /* make `triangular' Basis */
+  if (trace_enabled) {
+    double region_start = CoordTraceNowSeconds();
+
+    Make_CWS_Basis(_C, &B); /* make `triangular' Basis */
+    trace_make_basis_seconds += CoordTraceNowSeconds() - region_start;
+    trace_make_basis_count++;
+  } else
+    Make_CWS_Basis(_C, &B); /* make `triangular' Basis */
 #ifndef NO_COORD_IMPROVEMENT /* ==== Perm Coord Improvement ==== */
   assert(_C->N == _C->B.ne);
   for (i = 0; i < Cin->N; i++)
     Cin->B.e[i] = _C->B.e[pi[i]];
   Cin->B.ne = _C->N;
 #endif /* = End of Perm Coord Improvement = */
-  if (Cin->index == 1)
+  if (trace_enabled) {
+    double region_start = CoordTraceNowSeconds();
+
+    if (Cin->index == 1)
+      for (i = 0; i < Cin->N; i++)
+        X0[i] = 1;
+    else if (!Compute_X0(Cin->N - 1, Cin, X0)) {
+      if (timing_enabled) {
+        branch_x0_fail_count++;
+        CoordRecordMakeCWSPointsBranchStats(
+            branch_x0_fail_count, branch_seed_interval_empty_count,
+            branch_tighten_interval_empty_count, branch_zero_range_fail_count,
+            branch_seed_singleton_count, branch_tighten_singleton_count,
+            branch_singleton_remaining_constraint_count,
+            branch_zero_constraint_count, branch_nonzero_constraint_count,
+            branch_skipped_constraint_count);
+      }
+      _P->n = 0;
+      puts("no X0!");
+      return;
+    }
+    trace_compute_x0_seconds += CoordTraceNowSeconds() - region_start;
+    trace_compute_x0_count++;
+  } else if (Cin->index == 1)
     for (i = 0; i < Cin->N; i++)
       X0[i] = 1;
   else if (!Compute_X0(Cin->N - 1, Cin, X0)) {
+    if (timing_enabled) {
+      branch_x0_fail_count++;
+      CoordRecordMakeCWSPointsBranchStats(
+          branch_x0_fail_count, branch_seed_interval_empty_count,
+          branch_tighten_interval_empty_count, branch_zero_range_fail_count,
+          branch_seed_singleton_count, branch_tighten_singleton_count,
+          branch_singleton_remaining_constraint_count,
+          branch_zero_constraint_count, branch_nonzero_constraint_count,
+          branch_skipped_constraint_count);
+    }
     _P->n = 0;
     puts("no X0!");
     return;
@@ -1070,131 +1239,522 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
     fprintf(outFILE,"%d ",(int) Cin->d[i]);
     for(j=0;j<Cin->N;j++) fprintf(outFILE,"%d ",(int) Cin->W[i][j]);
     if(i+1<Cin->nw) fprintf(outFILE," ");     }*/
-  i = _P->n = B.n;
-  Amin[0] = 0;
-  Amin[B.n] = j = B.N; /* inversion structure */
-  while (--i) {
-    while (!B.x[i - 1][--j])
-      ;
-    Amin[i] = ++j;
-  }
-  for (i = 0; i < B.N; i++) /* compute Xmax */
-  {
-    Xmax[i] = 0;
-    for (j = 0; j < _C->nw; j++)
-      if (_C->W[j][i]) {
-        L = _C->d[j] / _C->W[j][i];
-        if (Xmax[i]) {
-          if (L < Xmax[i])
-            Xmax[i] = L;
-        } else
-          Xmax[i] = L;
-      }
-  }
-  j = B.n - 1;
-  i = Amin[j + 1] - 1;
-  R = B.x[j][i]; /* compute xmin[j] and xmax[j] */
-  xmin[j] = -PD_Floor(X0[i], R);
-  xmax[j] = PD_Floor(Xmax[i] - X0[i], R); /* since R > 0 */
-  /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
-  while ((i--) > Amin[j]) /* if(R=B.x[B.n-1][i]):  R!=0  => new limits */
-  {
-    Long Low = -X0[i], Upp = Low + Xmax[i];
-    R = B.x[B.n - 1][i];
-    if (R > 0) {
-      if (xmax[j] > (L = PD_Floor(Upp, R)))
-        xmax[j] = L;
-      if (xmin[j] < (L = -PD_Floor(-Low, R)))
-        xmin[j] = L;
-    } else {
-      if (xmax[j] > (L = PD_Floor(-Low, -R)))
-        xmax[j] = L;
-      if (xmin[j] < (L = -PD_Floor(Upp, -R)))
-        xmin[j] = L;
+  if (trace_enabled) {
+    double region_start = CoordTraceNowSeconds();
+
+    i = _P->n = B.n;
+    Amin[0] = 0;
+    Amin[B.n] = j = B.N; /* inversion structure */
+    while (--i) {
+      while (!B.x[i - 1][--j])
+        ;
+      Amin[i] = ++j;
     }
-    /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
-  } /* this completes the limits for x[B.n-1] */
-  x[j] = xmin[j];
-  while (j < B.n) {
-    int k;
-    if (x[j] > xmax[j]) {
-      if (B.n == (++j))
-        break;
-      else
-        x[j]++;
-    } else /* compute limits[j-1] and initialize x[j-1] */
+    trace_build_amin_seconds += CoordTraceNowSeconds() - region_start;
+    trace_build_amin_count++;
+  } else {
+    i = _P->n = B.n;
+    Amin[0] = 0;
+    Amin[B.n] = j = B.N; /* inversion structure */
+    while (--i) {
+      while (!B.x[i - 1][--j])
+        ;
+      Amin[i] = ++j;
+    }
+  }
+  if (trace_enabled) {
+    double region_start = CoordTraceNowSeconds();
+
+    for (i = 0; i < B.N; i++) /* compute Xmax */
     {
-      Long Upp = Xmax[i = Amin[j--] - 1], Low = -X0[i];
-      int RangeFlag = 0;
-      for (k = j + 1; k < B.n; k++)
-        Low -= x[k] * B.x[k][i]; /* compute offset */
-      Upp += Low;
-      R = B.x[j][i];
-      xmin[j] = -PD_Floor(-Low, R);
-      xmax[j] = PD_Floor(Upp, R);
-      /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/
-       * **/
-      while ((i--) > Amin[j])
-        if ((R = B.x[j][i])) /* R!=0  => new limits */
-        {
-          Low = -X0[i];
-          Upp = Xmax[i];
-          for (k = j + 1; k < B.n; k++)
-            Low -= x[k] * B.x[k][i];
-          Upp += Low;
-          R = B.x[j][i];
-          if (R > 0) {
-            if (xmax[j] > (L = PD_Floor(Upp, R)))
-              xmax[j] = L;
-            if (xmin[j] < (L = -PD_Floor(-Low, R)))
-              xmin[j] = L;
-          } else {
-            if (xmax[j] > (L = PD_Floor(-Low, -R)))
-              xmax[j] = L;
-            if (xmin[j] < (L = -PD_Floor(Upp, -R)))
-              xmin[j] = L;
-          }
-          /** /printf("R=%2d:  %2d <= x[%d=&%d] <=
-           * %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
-        } /* completes limits for x[] except */
-        else /*   when R=0 and X out of Range:  */
-        {
-          Long X = 1;
-          for (k = j + 1; k < B.n; k++)
-            X += x[k] * B.x[k][i];
-          if ((X < 0) || (X > Xmax[i]))
-            RangeFlag = 1;
+      Xmax[i] = 0;
+      for (j = 0; j < _C->nw; j++)
+        if (_C->W[j][i]) {
+          L = _C->d[j] / _C->W[j][i];
+          if (Xmax[i]) {
+            if (L < Xmax[i])
+              Xmax[i] = L;
+          } else
+            Xmax[i] = L;
         }
-      if (RangeFlag)
-        ++x[++j];
-      else
-        x[j] = xmin[j];
-      if (j == 0) {
-        while (x[0] <= xmax[0]) {
-          Long *y;
-          if ((++_P->np) < POINT_Nmax) {
-            y = (_P->x[_P->np]);
-            for (k = 0; k < B.n; k++)
-              y[k] = x[k];
-          } else if (_P->np == POINT_Nmax) {
-            y = xaux;
-            for (k = 0; k < B.n; k++)
-              y[k] = x[k];
-          } else {
-            puts("Increase POINT_Nmax");
-            exit(0);
-          }
-          x = y;
-          ++x[0];
+    }
+    trace_compute_xmax_seconds += CoordTraceNowSeconds() - region_start;
+    trace_compute_xmax_count++;
+  } else
+    for (i = 0; i < B.N; i++) /* compute Xmax */
+    {
+      Xmax[i] = 0;
+      for (j = 0; j < _C->nw; j++)
+        if (_C->W[j][i]) {
+          L = _C->d[j] / _C->W[j][i];
+          if (Xmax[i]) {
+            if (L < Xmax[i])
+              Xmax[i] = L;
+          } else
+            Xmax[i] = L;
         }
-        x[j = 1]++;
+    }
+  j = B.n - 1;
+  if (trace_enabled) {
+    double region_start = CoordTraceNowSeconds();
+
+    i = Amin[j + 1] - 1;
+    R = B.x[j][i]; /* compute xmin[j] and xmax[j] */
+    xmin[j] = -CoordTracePD_FloorSite("init_last_coord:xmin_from_x0",
+                                      trace_enabled, X0[i], R);
+    xmax[j] = CoordTracePD_FloorSite("init_last_coord:xmax_from_xmax",
+                                     trace_enabled, Xmax[i] - X0[i], R);
+    /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
+    while ((i--) > Amin[j]) /* if(R=B.x[B.n-1][i]):  R!=0  => new limits */
+    {
+      Long Low = -X0[i], Upp = Low + Xmax[i];
+      R = B.x[B.n - 1][i];
+      if (R > 0) {
+        if (xmax[j] >
+            (L = CoordTracePD_FloorSite("init_last_coord:tighten_pos_upper",
+                                        trace_enabled, Upp, R)))
+          xmax[j] = L;
+        if (xmin[j] <
+            (L = -CoordTracePD_FloorSite("init_last_coord:tighten_pos_lower",
+                                         trace_enabled, -Low, R)))
+          xmin[j] = L;
+      } else {
+        if (xmax[j] >
+            (L = CoordTracePD_FloorSite("init_last_coord:tighten_neg_upper",
+                                        trace_enabled, -Low, -R)))
+          xmax[j] = L;
+        if (xmin[j] <
+            (L = -CoordTracePD_FloorSite("init_last_coord:tighten_neg_lower",
+                                         trace_enabled, Upp, -R)))
+          xmin[j] = L;
+      }
+      /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
+    } /* this completes the limits for x[B.n-1] */
+    trace_init_last_bounds_seconds += CoordTraceNowSeconds() - region_start;
+    trace_init_last_bounds_count++;
+  } else {
+    i = Amin[j + 1] - 1;
+    R = B.x[j][i]; /* compute xmin[j] and xmax[j] */
+    xmin[j] = -PD_Floor(X0[i], R);
+    xmax[j] = PD_Floor(Xmax[i] - X0[i], R); /* since R > 0 */
+    /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
+    while ((i--) > Amin[j]) /* if(R=B.x[B.n-1][i]):  R!=0  => new limits */
+    {
+      Long Low = -X0[i], Upp = Low + Xmax[i];
+      R = B.x[B.n - 1][i];
+      if (R > 0) {
+        if (xmax[j] > (L = PD_Floor(Upp, R)))
+          xmax[j] = L;
+        if (xmin[j] < (L = -PD_Floor(-Low, R)))
+          xmin[j] = L;
+      } else {
+        if (xmax[j] > (L = PD_Floor(-Low, -R)))
+          xmax[j] = L;
+        if (xmin[j] < (L = -PD_Floor(Upp, -R)))
+          xmin[j] = L;
+      }
+      /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
+    } /* this completes the limits for x[B.n-1] */
+  }
+  x[j] = xmin[j];
+  if (trace_enabled) {
+    double region_start = CoordTraceNowSeconds();
+
+    while (j < B.n) {
+      int k;
+      double section_start;
+
+      section_start = CoordTraceNowSeconds();
+      if (x[j] > xmax[j]) {
+        if (B.n == (++j)) {
+          trace_enum_backtrack_seconds += CoordTraceNowSeconds() - section_start;
+          trace_enum_backtrack_count++;
+          break;
+        } else
+          x[j]++;
+        trace_enum_backtrack_seconds += CoordTraceNowSeconds() - section_start;
+        trace_enum_backtrack_count++;
+      } else /* compute limits[j-1] and initialize x[j-1] */
+      {
+        Long Upp = Xmax[i = Amin[j--] - 1], Low = -X0[i];
+        int RangeFlag = 0;
+        int SingletonRecorded = 0;
+
+        section_start = CoordTraceNowSeconds();
+        for (k = j + 1; k < B.n; k++)
+          Low -= x[k] * B.x[k][i]; /* compute offset */
+        Upp += Low;
+        R = B.x[j][i];
+        xmin[j] = -CoordTracePD_FloorSite("main_loop:seed_bounds:xmin",
+                                          trace_enabled, -Low, R);
+        xmax[j] = CoordTracePD_FloorSite("main_loop:seed_bounds:xmax",
+                                         trace_enabled, Upp, R);
+        /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/
+         * **/
+        trace_enum_seed_bounds_seconds += CoordTraceNowSeconds() - section_start;
+        trace_enum_seed_bounds_count++;
+        if (xmin[j] > xmax[j]) {
+          RangeFlag = 1;
+          branch_seed_interval_empty_count++;
+          branch_skipped_constraint_count += (unsigned long long)(i - Amin[j]);
+        } else if ((xmin[j] == xmax[j]) && (i > Amin[j])) {
+          SingletonRecorded = 1;
+          branch_seed_singleton_count++;
+          branch_singleton_remaining_constraint_count +=
+              (unsigned long long)(i - Amin[j]);
+        }
+
+        section_start = CoordTraceNowSeconds();
+        while (!RangeFlag && ((i--) > Amin[j]))
+          if ((R = B.x[j][i])) /* R!=0  => new limits */
+          {
+            branch_nonzero_constraint_count++;
+            Low = -X0[i];
+            Upp = Xmax[i];
+            for (k = j + 1; k < B.n; k++)
+              Low -= x[k] * B.x[k][i];
+            Upp += Low;
+            if (R > 0) {
+              if (xmax[j] >
+                  (L = CoordTracePD_FloorSite("main_loop:tighten_pos_upper",
+                                              trace_enabled, Upp, R)))
+                xmax[j] = L;
+              if (xmin[j] <
+                  (L = -CoordTracePD_FloorSite("main_loop:tighten_pos_lower",
+                                               trace_enabled, -Low, R)))
+                xmin[j] = L;
+            } else {
+              if (xmax[j] >
+                  (L = CoordTracePD_FloorSite("main_loop:tighten_neg_upper",
+                                              trace_enabled, -Low, -R)))
+                xmax[j] = L;
+              if (xmin[j] <
+                  (L = -CoordTracePD_FloorSite("main_loop:tighten_neg_lower",
+                                               trace_enabled, Upp, -R)))
+                xmin[j] = L;
+            }
+            if (xmin[j] > xmax[j]) {
+              RangeFlag = 1;
+              branch_tighten_interval_empty_count++;
+              branch_skipped_constraint_count +=
+                  (unsigned long long)(i - Amin[j]);
+            } else if (!SingletonRecorded && (xmin[j] == xmax[j]) &&
+                       (i > Amin[j])) {
+              SingletonRecorded = 1;
+              branch_tighten_singleton_count++;
+              branch_singleton_remaining_constraint_count +=
+                  (unsigned long long)(i - Amin[j]);
+            }
+            /** /printf("R=%2d:  %2d <= x[%d=&%d] <=
+             * %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
+          } /* completes limits for x[] except */
+          else /*   when R=0 and X out of Range:  */
+          {
+            Long X = 1;
+
+            branch_zero_constraint_count++;
+            for (k = j + 1; k < B.n; k++)
+              X += x[k] * B.x[k][i];
+            if ((X < 0) || (X > Xmax[i])) {
+              RangeFlag = 1;
+              branch_zero_range_fail_count++;
+              branch_skipped_constraint_count +=
+                  (unsigned long long)(i - Amin[j]);
+            }
+          }
+        trace_enum_tighten_bounds_seconds +=
+            CoordTraceNowSeconds() - section_start;
+        trace_enum_tighten_bounds_count++;
+
+        section_start = CoordTraceNowSeconds();
+        if (RangeFlag)
+          ++x[++j];
+        else
+          x[j] = xmin[j];
+        trace_enum_post_tighten_seconds +=
+            CoordTraceNowSeconds() - section_start;
+        trace_enum_post_tighten_count++;
+
+        if (j == 0) {
+          section_start = CoordTraceNowSeconds();
+          while (x[0] <= xmax[0]) {
+            Long *y;
+            if ((++_P->np) < POINT_Nmax) {
+              y = (_P->x[_P->np]);
+              for (k = 0; k < B.n; k++)
+                y[k] = x[k];
+            } else if (_P->np == POINT_Nmax) {
+              y = xaux;
+              for (k = 0; k < B.n; k++)
+                y[k] = x[k];
+            } else {
+              puts("Increase POINT_Nmax");
+              exit(0);
+            }
+            x = y;
+            ++x[0];
+          }
+          x[j = 1]++;
+          trace_enum_emit_points_seconds +=
+              CoordTraceNowSeconds() - section_start;
+          trace_enum_emit_points_count++;
+        }
       }
     }
+    trace_enumeration_total_seconds += CoordTraceNowSeconds() - region_start;
+    trace_enumeration_total_count++;
+  } else if (timing_enabled)
+    while (j < B.n) {
+      int k;
+      if (x[j] > xmax[j]) {
+        if (B.n == (++j))
+          break;
+        else
+          x[j]++;
+      } else /* compute limits[j-1] and initialize x[j-1] */
+      {
+        Long Upp = Xmax[i = Amin[j--] - 1], Low = -X0[i];
+        int RangeFlag = 0;
+        int SingletonRecorded = 0;
+
+        for (k = j + 1; k < B.n; k++)
+          Low -= x[k] * B.x[k][i]; /* compute offset */
+        Upp += Low;
+        R = B.x[j][i];
+        xmin[j] = -PD_Floor(-Low, R);
+        xmax[j] = PD_Floor(Upp, R);
+        /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/
+         * **/
+        if (xmin[j] > xmax[j]) {
+          RangeFlag = 1;
+          branch_seed_interval_empty_count++;
+          branch_skipped_constraint_count += (unsigned long long)(i - Amin[j]);
+        } else if ((xmin[j] == xmax[j]) && (i > Amin[j])) {
+          SingletonRecorded = 1;
+          branch_seed_singleton_count++;
+          branch_singleton_remaining_constraint_count +=
+              (unsigned long long)(i - Amin[j]);
+        }
+        while (!RangeFlag && ((i--) > Amin[j]))
+          if ((R = B.x[j][i])) /* R!=0  => new limits */
+          {
+            branch_nonzero_constraint_count++;
+            Low = -X0[i];
+            Upp = Xmax[i];
+            for (k = j + 1; k < B.n; k++)
+              Low -= x[k] * B.x[k][i];
+            Upp += Low;
+            if (R > 0) {
+              if (xmax[j] > (L = PD_Floor(Upp, R)))
+                xmax[j] = L;
+              if (xmin[j] < (L = -PD_Floor(-Low, R)))
+                xmin[j] = L;
+            } else {
+              if (xmax[j] > (L = PD_Floor(-Low, -R)))
+                xmax[j] = L;
+              if (xmin[j] < (L = -PD_Floor(Upp, -R)))
+                xmin[j] = L;
+            }
+            if (xmin[j] > xmax[j]) {
+              RangeFlag = 1;
+              branch_tighten_interval_empty_count++;
+              branch_skipped_constraint_count +=
+                  (unsigned long long)(i - Amin[j]);
+            } else if (!SingletonRecorded && (xmin[j] == xmax[j]) &&
+                       (i > Amin[j])) {
+              SingletonRecorded = 1;
+              branch_tighten_singleton_count++;
+              branch_singleton_remaining_constraint_count +=
+                  (unsigned long long)(i - Amin[j]);
+            }
+            /** /printf("R=%2d:  %2d <= x[%d=&%d] <=
+             * %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
+          } /* completes limits for x[] except */
+          else /*   when R=0 and X out of Range:  */
+          {
+            Long X = 1;
+
+            branch_zero_constraint_count++;
+            for (k = j + 1; k < B.n; k++)
+              X += x[k] * B.x[k][i];
+            if ((X < 0) || (X > Xmax[i])) {
+              RangeFlag = 1;
+              branch_zero_range_fail_count++;
+              branch_skipped_constraint_count +=
+                  (unsigned long long)(i - Amin[j]);
+            }
+          }
+        if (RangeFlag)
+          ++x[++j];
+        else
+          x[j] = xmin[j];
+        if (j == 0) {
+          while (x[0] <= xmax[0]) {
+            Long *y;
+            if ((++_P->np) < POINT_Nmax) {
+              y = (_P->x[_P->np]);
+              for (k = 0; k < B.n; k++)
+                y[k] = x[k];
+            } else if (_P->np == POINT_Nmax) {
+              y = xaux;
+              for (k = 0; k < B.n; k++)
+                y[k] = x[k];
+            } else {
+              puts("Increase POINT_Nmax");
+              exit(0);
+            }
+            x = y;
+            ++x[0];
+          }
+          x[j = 1]++;
+        }
+      }
+    }
+  else
+    while (j < B.n) {
+      int k;
+      if (x[j] > xmax[j]) {
+        if (B.n == (++j))
+          break;
+        else
+          x[j]++;
+      } else /* compute limits[j-1] and initialize x[j-1] */
+      {
+        Long Upp = Xmax[i = Amin[j--] - 1], Low = -X0[i];
+        int RangeFlag = 0;
+
+        for (k = j + 1; k < B.n; k++)
+          Low -= x[k] * B.x[k][i]; /* compute offset */
+        Upp += Low;
+        R = B.x[j][i];
+        xmin[j] = -PD_Floor(-Low, R);
+        xmax[j] = PD_Floor(Upp, R);
+        /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/
+         * **/
+        if (xmin[j] > xmax[j])
+          RangeFlag = 1;
+        while (!RangeFlag && ((i--) > Amin[j]))
+          if ((R = B.x[j][i])) /* R!=0  => new limits */
+          {
+            Low = -X0[i];
+            Upp = Xmax[i];
+            for (k = j + 1; k < B.n; k++)
+              Low -= x[k] * B.x[k][i];
+            Upp += Low;
+            if (R > 0) {
+              if (xmax[j] > (L = PD_Floor(Upp, R)))
+                xmax[j] = L;
+              if (xmin[j] < (L = -PD_Floor(-Low, R)))
+                xmin[j] = L;
+            } else {
+              if (xmax[j] > (L = PD_Floor(-Low, -R)))
+                xmax[j] = L;
+              if (xmin[j] < (L = -PD_Floor(Upp, -R)))
+                xmin[j] = L;
+            }
+            if (xmin[j] > xmax[j])
+              RangeFlag = 1;
+            /** /printf("R=%2d:  %2d <= x[%d=&%d] <=
+             * %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
+          } /* completes limits for x[] except */
+          else /*   when R=0 and X out of Range:  */
+          {
+            Long X = 1;
+
+            for (k = j + 1; k < B.n; k++)
+              X += x[k] * B.x[k][i];
+            if ((X < 0) || (X > Xmax[i]))
+              RangeFlag = 1;
+          }
+        if (RangeFlag)
+          ++x[++j];
+        else
+          x[j] = xmin[j];
+        if (j == 0) {
+          while (x[0] <= xmax[0]) {
+            Long *y;
+            if ((++_P->np) < POINT_Nmax) {
+              y = (_P->x[_P->np]);
+              for (k = 0; k < B.n; k++)
+                y[k] = x[k];
+            } else if (_P->np == POINT_Nmax) {
+              y = xaux;
+              for (k = 0; k < B.n; k++)
+                y[k] = x[k];
+            } else {
+              puts("Increase POINT_Nmax");
+              exit(0);
+            }
+            x = y;
+            ++x[0];
+          }
+          x[j = 1]++;
+        }
+      }
+    }
+  if (trace_enabled) {
+    if (m) {
+      double region_start = CoordTraceNowSeconds();
+
+      CWS_2_SublatZ(_C, &B, &m, M, G);
+      trace_sublat_z_seconds += CoordTraceNowSeconds() - region_start;
+      trace_sublat_z_count++;
+    }
+    if (m) {
+      double region_start = CoordTraceNowSeconds();
+
+      Reduce_PPL_2_Sublat(_P, &m, M, G);
+      trace_reduce_ppl_seconds += CoordTraceNowSeconds() - region_start;
+      trace_reduce_ppl_count++;
+    }
+    CoordTraceRecordRegionSummary("make_basis", trace_make_basis_count,
+                                  trace_make_basis_seconds);
+    CoordTraceRecordRegionSummary("compute_x0", trace_compute_x0_count,
+                                  trace_compute_x0_seconds);
+    CoordTraceRecordRegionSummary("build_amin", trace_build_amin_count,
+                                  trace_build_amin_seconds);
+    CoordTraceRecordRegionSummary("compute_xmax", trace_compute_xmax_count,
+                                  trace_compute_xmax_seconds);
+    CoordTraceRecordRegionSummary("init_last_coord_bounds",
+                                  trace_init_last_bounds_count,
+                                  trace_init_last_bounds_seconds);
+    CoordTraceRecordRegionSummary("enumeration_total",
+                                  trace_enumeration_total_count,
+                                  trace_enumeration_total_seconds);
+    CoordTraceRecordRegionSummary("enum.backtrack_advance",
+                                  trace_enum_backtrack_count,
+                                  trace_enum_backtrack_seconds);
+    CoordTraceRecordRegionSummary("enum.seed_bounds",
+                                  trace_enum_seed_bounds_count,
+                                  trace_enum_seed_bounds_seconds);
+    CoordTraceRecordRegionSummary("enum.tighten_bounds",
+                                  trace_enum_tighten_bounds_count,
+                                  trace_enum_tighten_bounds_seconds);
+    CoordTraceRecordRegionSummary("enum.post_tighten_update",
+                                  trace_enum_post_tighten_count,
+                                  trace_enum_post_tighten_seconds);
+    CoordTraceRecordRegionSummary("enum.emit_points",
+                                  trace_enum_emit_points_count,
+                                  trace_enum_emit_points_seconds);
+    CoordTraceRecordRegionSummary("sublattice_z", trace_sublat_z_count,
+                                  trace_sublat_z_seconds);
+    CoordTraceRecordRegionSummary("reduce_ppl_to_sublattice",
+                                  trace_reduce_ppl_count,
+                                  trace_reduce_ppl_seconds);
+  } else {
+    if (m)
+      CWS_2_SublatZ(_C, &B, &m, M, G);
+    if (m)
+      Reduce_PPL_2_Sublat(_P, &m, M, G);
   }
-  if (m)
-    CWS_2_SublatZ(_C, &B, &m, M, G);
-  if (m)
-    Reduce_PPL_2_Sublat(_P, &m, M, G);
+  if (timing_enabled)
+    CoordRecordMakeCWSPointsBranchStats(
+        branch_x0_fail_count, branch_seed_interval_empty_count,
+        branch_tighten_interval_empty_count, branch_zero_range_fail_count,
+        branch_seed_singleton_count, branch_tighten_singleton_count,
+        branch_singleton_remaining_constraint_count,
+        branch_zero_constraint_count, branch_nonzero_constraint_count,
+        branch_skipped_constraint_count);
 }
 
 /*  ==========    Coordinate improvement via CWS-Permutations   ==========  */
