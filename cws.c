@@ -3896,7 +3896,8 @@ void Make_IP_CWS(int narg, char *fn[]) {
   else if ((outFILE = fopen(outfile, "w")) == NULL) {
     printf("\nUnable to open file %s for write\n", fn[n]);
     exit(0);
-  }
+  } else
+    setvbuf(outFILE, NULL, _IOFBF, 1 << 20);
   scan_dim(nF, infile, D);
   for (i = 0; i < nF; i++) {
     if ((INFILE[i] = fopen(infile[i], "r")) == NULL)
