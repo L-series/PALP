@@ -1300,33 +1300,52 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
 
     i = Amin[j + 1] - 1;
     R = B.x[j][i]; /* compute xmin[j] and xmax[j] */
-    xmin[j] = -CoordTracePD_FloorSite("init_last_coord:xmin_from_x0",
-                                      trace_enabled, X0[i], R);
-    xmax[j] = CoordTracePD_FloorSite("init_last_coord:xmax_from_xmax",
-                                     trace_enabled, Xmax[i] - X0[i], R);
+    if (R == 1) {
+      xmin[j] = -X0[i];
+      xmax[j] = Xmax[i] - X0[i];
+    } else {
+      xmin[j] = -CoordTracePD_FloorSite("init_last_coord:xmin_from_x0",
+                                        trace_enabled, X0[i], R);
+      xmax[j] = CoordTracePD_FloorSite("init_last_coord:xmax_from_xmax",
+                                       trace_enabled, Xmax[i] - X0[i], R);
+    }
     /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
     while ((i--) > Amin[j]) /* if(R=B.x[B.n-1][i]):  R!=0  => new limits */
     {
       Long Low = -X0[i], Upp = Low + Xmax[i];
       R = B.x[B.n - 1][i];
       if (R > 0) {
-        if (xmax[j] >
-            (L = CoordTracePD_FloorSite("init_last_coord:tighten_pos_upper",
-                                        trace_enabled, Upp, R)))
-          xmax[j] = L;
-        if (xmin[j] <
-            (L = -CoordTracePD_FloorSite("init_last_coord:tighten_pos_lower",
-                                         trace_enabled, -Low, R)))
-          xmin[j] = L;
+        if (R == 1) {
+          if (xmax[j] > Upp)
+            xmax[j] = Upp;
+          if (xmin[j] < Low)
+            xmin[j] = Low;
+        } else {
+          if (xmax[j] >
+              (L = CoordTracePD_FloorSite("init_last_coord:tighten_pos_upper",
+                                          trace_enabled, Upp, R)))
+            xmax[j] = L;
+          if (xmin[j] <
+              (L = -CoordTracePD_FloorSite("init_last_coord:tighten_pos_lower",
+                                           trace_enabled, -Low, R)))
+            xmin[j] = L;
+        }
       } else {
-        if (xmax[j] >
-            (L = CoordTracePD_FloorSite("init_last_coord:tighten_neg_upper",
-                                        trace_enabled, -Low, -R)))
-          xmax[j] = L;
-        if (xmin[j] <
-            (L = -CoordTracePD_FloorSite("init_last_coord:tighten_neg_lower",
-                                         trace_enabled, Upp, -R)))
-          xmin[j] = L;
+        if (R == -1) {
+          if (xmax[j] > (-Low))
+            xmax[j] = -Low;
+          if (xmin[j] < (-Upp))
+            xmin[j] = -Upp;
+        } else {
+          if (xmax[j] >
+              (L = CoordTracePD_FloorSite("init_last_coord:tighten_neg_upper",
+                                          trace_enabled, -Low, -R)))
+            xmax[j] = L;
+          if (xmin[j] <
+              (L = -CoordTracePD_FloorSite("init_last_coord:tighten_neg_lower",
+                                           trace_enabled, Upp, -R)))
+            xmin[j] = L;
+        }
       }
       /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
     } /* this completes the limits for x[B.n-1] */
@@ -1335,23 +1354,42 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
   } else {
     i = Amin[j + 1] - 1;
     R = B.x[j][i]; /* compute xmin[j] and xmax[j] */
-    xmin[j] = -PD_Floor(X0[i], R);
-    xmax[j] = PD_Floor(Xmax[i] - X0[i], R); /* since R > 0 */
+    if (R == 1) {
+      xmin[j] = -X0[i];
+      xmax[j] = Xmax[i] - X0[i];
+    } else {
+      xmin[j] = -PD_Floor(X0[i], R);
+      xmax[j] = PD_Floor(Xmax[i] - X0[i], R); /* since R > 0 */
+    }
     /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
     while ((i--) > Amin[j]) /* if(R=B.x[B.n-1][i]):  R!=0  => new limits */
     {
       Long Low = -X0[i], Upp = Low + Xmax[i];
       R = B.x[B.n - 1][i];
       if (R > 0) {
-        if (xmax[j] > (L = PD_Floor(Upp, R)))
-          xmax[j] = L;
-        if (xmin[j] < (L = -PD_Floor(-Low, R)))
-          xmin[j] = L;
+        if (R == 1) {
+          if (xmax[j] > Upp)
+            xmax[j] = Upp;
+          if (xmin[j] < Low)
+            xmin[j] = Low;
+        } else {
+          if (xmax[j] > (L = PD_Floor(Upp, R)))
+            xmax[j] = L;
+          if (xmin[j] < (L = -PD_Floor(-Low, R)))
+            xmin[j] = L;
+        }
       } else {
-        if (xmax[j] > (L = PD_Floor(-Low, -R)))
-          xmax[j] = L;
-        if (xmin[j] < (L = -PD_Floor(Upp, -R)))
-          xmin[j] = L;
+        if (R == -1) {
+          if (xmax[j] > (-Low))
+            xmax[j] = -Low;
+          if (xmin[j] < (-Upp))
+            xmin[j] = -Upp;
+        } else {
+          if (xmax[j] > (L = PD_Floor(-Low, -R)))
+            xmax[j] = L;
+          if (xmin[j] < (L = -PD_Floor(Upp, -R)))
+            xmin[j] = L;
+        }
       }
       /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
     } /* this completes the limits for x[B.n-1] */
@@ -1385,10 +1423,15 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
           Low -= x[k] * B.x[k][i]; /* compute offset */
         Upp += Low;
         R = B.x[j][i];
-        xmin[j] = -CoordTracePD_FloorSite("main_loop:seed_bounds:xmin",
-                                          trace_enabled, -Low, R);
-        xmax[j] = CoordTracePD_FloorSite("main_loop:seed_bounds:xmax",
-                                         trace_enabled, Upp, R);
+        if (R == 1) {
+          xmin[j] = Low;
+          xmax[j] = Upp;
+        } else {
+          xmin[j] = -CoordTracePD_FloorSite("main_loop:seed_bounds:xmin",
+                                            trace_enabled, -Low, R);
+          xmax[j] = CoordTracePD_FloorSite("main_loop:seed_bounds:xmax",
+                                           trace_enabled, Upp, R);
+        }
         /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/
          * **/
         trace_enum_seed_bounds_seconds += CoordTraceNowSeconds() - section_start;
@@ -1415,23 +1458,37 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
               Low -= x[k] * B.x[k][i];
             Upp += Low;
             if (R > 0) {
-              if (xmax[j] >
-                  (L = CoordTracePD_FloorSite("main_loop:tighten_pos_upper",
-                                              trace_enabled, Upp, R)))
-                xmax[j] = L;
-              if (xmin[j] <
-                  (L = -CoordTracePD_FloorSite("main_loop:tighten_pos_lower",
-                                               trace_enabled, -Low, R)))
-                xmin[j] = L;
+              if (R == 1) {
+                if (xmax[j] > Upp)
+                  xmax[j] = Upp;
+                if (xmin[j] < Low)
+                  xmin[j] = Low;
+              } else {
+                if (xmax[j] >
+                    (L = CoordTracePD_FloorSite("main_loop:tighten_pos_upper",
+                                                trace_enabled, Upp, R)))
+                  xmax[j] = L;
+                if (xmin[j] <
+                    (L = -CoordTracePD_FloorSite("main_loop:tighten_pos_lower",
+                                                 trace_enabled, -Low, R)))
+                  xmin[j] = L;
+              }
             } else {
-              if (xmax[j] >
-                  (L = CoordTracePD_FloorSite("main_loop:tighten_neg_upper",
-                                              trace_enabled, -Low, -R)))
-                xmax[j] = L;
-              if (xmin[j] <
-                  (L = -CoordTracePD_FloorSite("main_loop:tighten_neg_lower",
-                                               trace_enabled, Upp, -R)))
-                xmin[j] = L;
+              if (R == -1) {
+                if (xmax[j] > (-Low))
+                  xmax[j] = -Low;
+                if (xmin[j] < (-Upp))
+                  xmin[j] = -Upp;
+              } else {
+                if (xmax[j] >
+                    (L = CoordTracePD_FloorSite("main_loop:tighten_neg_upper",
+                                                trace_enabled, -Low, -R)))
+                  xmax[j] = L;
+                if (xmin[j] <
+                    (L = -CoordTracePD_FloorSite("main_loop:tighten_neg_lower",
+                                                 trace_enabled, Upp, -R)))
+                  xmin[j] = L;
+              }
             }
             if (xmin[j] > xmax[j]) {
               RangeFlag = 1;
@@ -1521,8 +1578,13 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
           Low -= x[k] * B.x[k][i]; /* compute offset */
         Upp += Low;
         R = B.x[j][i];
-        xmin[j] = -PD_Floor(-Low, R);
-        xmax[j] = PD_Floor(Upp, R);
+        if (R == 1) {
+          xmin[j] = Low;
+          xmax[j] = Upp;
+        } else {
+          xmin[j] = -PD_Floor(-Low, R);
+          xmax[j] = PD_Floor(Upp, R);
+        }
         /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/
          * **/
         if (xmin[j] > xmax[j]) {
@@ -1545,15 +1607,29 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
               Low -= x[k] * B.x[k][i];
             Upp += Low;
             if (R > 0) {
-              if (xmax[j] > (L = PD_Floor(Upp, R)))
-                xmax[j] = L;
-              if (xmin[j] < (L = -PD_Floor(-Low, R)))
-                xmin[j] = L;
+              if (R == 1) {
+                if (xmax[j] > Upp)
+                  xmax[j] = Upp;
+                if (xmin[j] < Low)
+                  xmin[j] = Low;
+              } else {
+                if (xmax[j] > (L = PD_Floor(Upp, R)))
+                  xmax[j] = L;
+                if (xmin[j] < (L = -PD_Floor(-Low, R)))
+                  xmin[j] = L;
+              }
             } else {
-              if (xmax[j] > (L = PD_Floor(-Low, -R)))
-                xmax[j] = L;
-              if (xmin[j] < (L = -PD_Floor(Upp, -R)))
-                xmin[j] = L;
+              if (R == -1) {
+                if (xmax[j] > (-Low))
+                  xmax[j] = -Low;
+                if (xmin[j] < (-Upp))
+                  xmin[j] = -Upp;
+              } else {
+                if (xmax[j] > (L = PD_Floor(-Low, -R)))
+                  xmax[j] = L;
+                if (xmin[j] < (L = -PD_Floor(Upp, -R)))
+                  xmin[j] = L;
+              }
             }
             if (xmin[j] > xmax[j]) {
               RangeFlag = 1;
@@ -1627,8 +1703,13 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
           Low -= x[k] * B.x[k][i]; /* compute offset */
         Upp += Low;
         R = B.x[j][i];
-        xmin[j] = -PD_Floor(-Low, R);
-        xmax[j] = PD_Floor(Upp, R);
+        if (R == 1) {
+          xmin[j] = Low;
+          xmax[j] = Upp;
+        } else {
+          xmin[j] = -PD_Floor(-Low, R);
+          xmax[j] = PD_Floor(Upp, R);
+        }
         /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/
          * **/
         if (xmin[j] > xmax[j])
@@ -1642,15 +1723,29 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
               Low -= x[k] * B.x[k][i];
             Upp += Low;
             if (R > 0) {
-              if (xmax[j] > (L = PD_Floor(Upp, R)))
-                xmax[j] = L;
-              if (xmin[j] < (L = -PD_Floor(-Low, R)))
-                xmin[j] = L;
+              if (R == 1) {
+                if (xmax[j] > Upp)
+                  xmax[j] = Upp;
+                if (xmin[j] < Low)
+                  xmin[j] = Low;
+              } else {
+                if (xmax[j] > (L = PD_Floor(Upp, R)))
+                  xmax[j] = L;
+                if (xmin[j] < (L = -PD_Floor(-Low, R)))
+                  xmin[j] = L;
+              }
             } else {
-              if (xmax[j] > (L = PD_Floor(-Low, -R)))
-                xmax[j] = L;
-              if (xmin[j] < (L = -PD_Floor(Upp, -R)))
-                xmin[j] = L;
+              if (R == -1) {
+                if (xmax[j] > (-Low))
+                  xmax[j] = -Low;
+                if (xmin[j] < (-Upp))
+                  xmin[j] = -Upp;
+              } else {
+                if (xmax[j] > (L = PD_Floor(-Low, -R)))
+                  xmax[j] = L;
+                if (xmin[j] < (L = -PD_Floor(Upp, -R)))
+                  xmin[j] = L;
+              }
             }
             if (xmin[j] > xmax[j])
               RangeFlag = 1;
