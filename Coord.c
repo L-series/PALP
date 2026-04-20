@@ -1,6 +1,7 @@
 #include "Global.h"
 #include "Rat.h"
 #include "../src/verify/type3_bounds_bench_common.h"
+#include "../src/verify/type3_bounds_runtime.h"
 
 #ifdef __linux__
 #include <dlfcn.h>
@@ -229,6 +230,14 @@ typedef int (*CoordType3CudaEvaluateFn)(CoordType3CudaContext *context,
                                         uint32_t job_count,
                                         char *error_buffer,
                                         size_t error_buffer_size);
+typedef int (*CoordType3CudaEnumerateFn)(CoordType3CudaContext *context,
+                                         const Type3BoundsCudaProblem *problem,
+                                         uint32_t point_capacity,
+                                         int64_t *points,
+                                         uint32_t *point_count,
+                                         Type3BoundsCudaStats *stats,
+                                         char *error_buffer,
+                                         size_t error_buffer_size);
 typedef void (*CoordType3CudaDestroyFn)(CoordType3CudaContext *context);
 
 typedef struct {
@@ -245,6 +254,7 @@ typedef struct {
   CoordType3CudaContext *cuda_context;
   CoordType3CudaCreateFn cuda_create;
   CoordType3CudaEvaluateFn cuda_evaluate;
+  CoordType3CudaEnumerateFn cuda_enumerate;
   CoordType3CudaDestroyFn cuda_destroy;
 } CoordType3FrontierConfig;
 
@@ -332,6 +342,7 @@ static void CoordType3FrontierDisableCuda(void) {
 #endif
   gCoordType3Frontier.cuda_create = NULL;
   gCoordType3Frontier.cuda_evaluate = NULL;
+  gCoordType3Frontier.cuda_enumerate = NULL;
   gCoordType3Frontier.cuda_destroy = NULL;
   gCoordType3Frontier.use_cuda = 0;
 }
@@ -395,11 +406,15 @@ static void CoordType3FrontierInit(void) {
       gCoordType3Frontier.cuda_evaluate =
           (CoordType3CudaEvaluateFn)dlsym(gCoordType3Frontier.library_handle,
                                           "Type3BoundsCudaEvaluate");
+        gCoordType3Frontier.cuda_enumerate =
+          (CoordType3CudaEnumerateFn)dlsym(gCoordType3Frontier.library_handle,
+                           "Type3BoundsCudaEnumerate");
       gCoordType3Frontier.cuda_destroy =
           (CoordType3CudaDestroyFn)dlsym(gCoordType3Frontier.library_handle,
                                          "Type3BoundsCudaDestroy");
       if ((gCoordType3Frontier.cuda_create == NULL) ||
           (gCoordType3Frontier.cuda_evaluate == NULL) ||
+          (gCoordType3Frontier.cuda_enumerate == NULL) ||
           (gCoordType3Frontier.cuda_destroy == NULL)) {
         if (gCoordType3Frontier.verbose)
           fprintf(stderr,
@@ -476,6 +491,83 @@ static void CoordEvaluateType3BoundsBatch(const Type3BoundsJob *jobs,
   }
 
   CoordEvaluateType3BoundsCpu(jobs, results, job_count);
+}
+
+static void CoordCopyFrontierStatsFromCuda(CoordType3FrontierStats *stats,
+                                           const Type3BoundsCudaStats *cuda_stats) {
+  if ((stats == NULL) || (cuda_stats == NULL))
+    return;
+
+  stats->seed_interval_empty_count = cuda_stats->seed_interval_empty_count;
+  stats->tighten_interval_empty_count = cuda_stats->tighten_interval_empty_count;
+  stats->zero_range_fail_count = cuda_stats->zero_range_fail_count;
+  stats->seed_singleton_count = cuda_stats->seed_singleton_count;
+  stats->tighten_singleton_count = cuda_stats->tighten_singleton_count;
+  stats->singleton_remaining_constraint_count =
+      cuda_stats->singleton_remaining_constraint_count;
+  stats->zero_constraint_count = cuda_stats->zero_constraint_count;
+  stats->nonzero_constraint_count = cuda_stats->nonzero_constraint_count;
+  stats->skipped_constraint_count = cuda_stats->skipped_constraint_count;
+}
+
+static int CoordTryType3CudaEnumerate(const CWLatticeBasis *B,
+                                      const int *Amin, const Long *X0,
+                                      const Long *Xmax, Long initial_xmin,
+                                      Long initial_xmax, PolyPointList *_P,
+                                      CoordType3FrontierStats *stats) {
+  Type3BoundsCudaProblem problem;
+  Type3BoundsCudaStats cuda_stats;
+  uint32_t point_count = 0;
+  char error_buffer[256] = {0};
+  int row, column;
+
+  CoordType3FrontierInit();
+  if (!gCoordType3Frontier.use_cuda ||
+      (gCoordType3Frontier.cuda_context == NULL) ||
+      (gCoordType3Frontier.cuda_enumerate == NULL))
+    return 0;
+
+  if ((B->n > kType3BoundsRuntimeMaxDimension) ||
+      (B->N > kType3BoundsRuntimeMaxAmbient)) {
+    if (gCoordType3Frontier.verbose)
+      fprintf(stderr,
+              "# type3 frontier: CUDA runtime limits exceeded (n=%d, N=%d), falling back to cpu\n",
+              B->n, B->N);
+    CoordType3FrontierDisableCuda();
+    return 0;
+  }
+
+  memset(&problem, 0, sizeof(problem));
+  memset(&cuda_stats, 0, sizeof(cuda_stats));
+  problem.n = (uint32_t)B->n;
+  problem.ambient_count = (uint32_t)B->N;
+  for (row = 0; row <= B->n; row++)
+    problem.Amin[row] = Amin[row];
+  for (row = 0; row < B->n; row++)
+    for (column = 0; column < B->N; column++)
+      problem.basis[row][column] = (int64_t)B->x[row][column];
+  for (column = 0; column < B->N; column++) {
+    problem.X0[column] = (int64_t)X0[column];
+    problem.Xmax[column] = (int64_t)Xmax[column];
+  }
+  problem.initial_xmin = (int64_t)initial_xmin;
+  problem.initial_xmax = (int64_t)initial_xmax;
+
+  if (gCoordType3Frontier.cuda_enumerate(gCoordType3Frontier.cuda_context,
+                                         &problem, (uint32_t)POINT_Nmax,
+                                         (int64_t *)_P->x, &point_count,
+                                         &cuda_stats, error_buffer,
+                                         sizeof(error_buffer)) == 0) {
+    _P->np = (int)point_count;
+    CoordCopyFrontierStatsFromCuda(stats, &cuda_stats);
+    return 1;
+  }
+
+  fprintf(stderr,
+          "# type3 frontier: CUDA enumerate failed (%s), falling back to cpu\n",
+          error_buffer[0] ? error_buffer : "unknown error");
+  CoordType3FrontierDisableCuda();
+  return 0;
 }
 
 static int CoordShouldUseType3Frontier(CWS *Cin, int trace_enabled,
@@ -620,6 +712,10 @@ static int CoordRunType3FrontierEnumeration(const CWLatticeBasis *B,
   CoordFrontierListInit(&current);
   CoordFrontierListInit(&next);
   _P->np = 0;
+
+  if (CoordTryType3CudaEnumerate(B, Amin, X0, Xmax, initial_xmin,
+                                 initial_xmax, _P, stats))
+    return 1;
 
   jobs = (Type3BoundsJob *)malloc((size_t)batch_size * sizeof(Type3BoundsJob));
   results = (Type3BoundsResult *)malloc((size_t)batch_size *
