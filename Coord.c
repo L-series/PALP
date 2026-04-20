@@ -17,8 +17,17 @@ typedef struct {
 } CWLatticeBasis;
 
 void Make_CWS_Points(CWS *_C, PolyPointList *_P);
+int Make_CWS_Points_Batchable(CWS *Cin);
+void Make_CWS_Points_Batch(CWS *candidates, PolyPointList **outputs,
+                           int candidate_count, double *make_seconds);
 void Make_RGC_Points(CWS *Cin, PolyPointList *_P);
+void Make_CWS_Basis(CWS *_C, CWLatticeBasis *_B);
 void CWS_to_PermCWS(CWS *Cin, CWS *C, int *pi);
+void CWS_2_SublatZ(CWS *C, CWLatticeBasis *B, int *m, Long *M,
+                   Long G[POLY_Dmax][POLY_Dmax]);
+int Compute_X0(int N, CWS *_C, Long *X0);
+void Reduce_PPL_2_Sublat(PolyPointList *P, int *nm, Long *M,
+                         Long G[][POLY_Dmax]);
 Long PD_Floor(Long N, Long D);
 
 int PALPTraceActive(void) __attribute__((weak));
@@ -238,6 +247,16 @@ typedef int (*CoordType3CudaEnumerateFn)(CoordType3CudaContext *context,
                                          Type3BoundsCudaStats *stats,
                                          char *error_buffer,
                                          size_t error_buffer_size);
+typedef int (*CoordType3CudaEnumerateBatchFn)(
+  CoordType3CudaContext *context,
+  const Type3BoundsCudaProblem *problems,
+  uint32_t problem_count,
+  uint32_t point_capacity,
+  int64_t **points,
+  uint32_t *point_counts,
+  Type3BoundsCudaStats *stats,
+  char *error_buffer,
+  size_t error_buffer_size);
 typedef void (*CoordType3CudaDestroyFn)(CoordType3CudaContext *context);
 
 typedef struct {
@@ -255,6 +274,7 @@ typedef struct {
   CoordType3CudaCreateFn cuda_create;
   CoordType3CudaEvaluateFn cuda_evaluate;
   CoordType3CudaEnumerateFn cuda_enumerate;
+  CoordType3CudaEnumerateBatchFn cuda_enumerate_batch;
   CoordType3CudaDestroyFn cuda_destroy;
 } CoordType3FrontierConfig;
 
@@ -343,6 +363,7 @@ static void CoordType3FrontierDisableCuda(void) {
   gCoordType3Frontier.cuda_create = NULL;
   gCoordType3Frontier.cuda_evaluate = NULL;
   gCoordType3Frontier.cuda_enumerate = NULL;
+  gCoordType3Frontier.cuda_enumerate_batch = NULL;
   gCoordType3Frontier.cuda_destroy = NULL;
   gCoordType3Frontier.use_cuda = 0;
 }
@@ -409,6 +430,10 @@ static void CoordType3FrontierInit(void) {
         gCoordType3Frontier.cuda_enumerate =
           (CoordType3CudaEnumerateFn)dlsym(gCoordType3Frontier.library_handle,
                            "Type3BoundsCudaEnumerate");
+        gCoordType3Frontier.cuda_enumerate_batch =
+          (CoordType3CudaEnumerateBatchFn)dlsym(
+            gCoordType3Frontier.library_handle,
+            "Type3BoundsCudaEnumerateBatch");
       gCoordType3Frontier.cuda_destroy =
           (CoordType3CudaDestroyFn)dlsym(gCoordType3Frontier.library_handle,
                                          "Type3BoundsCudaDestroy");
@@ -443,10 +468,12 @@ static void CoordType3FrontierInit(void) {
   }
 
   if (gCoordType3Frontier.verbose)
-    fprintf(stderr, "# type3 frontier: mode=%s batch=%u block=%u\n",
+    fprintf(stderr,
+    "# type3 frontier: mode=%s batch=%u block=%u candidate-batch-api=%s\n",
             gCoordType3Frontier.use_cuda ? "cuda" : "cpu",
             gCoordType3Frontier.batch_size,
-            gCoordType3Frontier.block_size);
+      gCoordType3Frontier.block_size,
+      gCoordType3Frontier.cuda_enumerate_batch != NULL ? "yes" : "no");
 }
 
 static int CoordType3FrontierEnabled(void) {
@@ -586,6 +613,336 @@ static int CoordShouldUseType3Frontier(CWS *Cin, int trace_enabled,
       kType3BoundsMaxConstraints)
     return 0;
   return 1;
+}
+
+typedef struct {
+  CWS *input;
+  PolyPointList *output;
+  CWLatticeBasis basis;
+  int Amin[POLY_Dmax + 1];
+  Long X0[AMBI_Dmax];
+  Long Xmax[AMBI_Dmax];
+  Long initial_xmin;
+  Long initial_xmax;
+  int m;
+} CoordType3BatchCandidate;
+
+static void CoordPopulateType3CudaProblem(
+    const CoordType3BatchCandidate *candidate,
+    Type3BoundsCudaProblem *problem) {
+  int row, column;
+
+  memset(problem, 0, sizeof(*problem));
+  problem->n = (uint32_t)candidate->basis.n;
+  problem->ambient_count = (uint32_t)candidate->basis.N;
+  for (row = 0; row <= candidate->basis.n; row++)
+    problem->Amin[row] = candidate->Amin[row];
+  for (row = 0; row < candidate->basis.n; row++)
+    for (column = 0; column < candidate->basis.N; column++)
+      problem->basis[row][column] = (int64_t)candidate->basis.x[row][column];
+  for (column = 0; column < candidate->basis.N; column++) {
+    problem->X0[column] = (int64_t)candidate->X0[column];
+    problem->Xmax[column] = (int64_t)candidate->Xmax[column];
+  }
+  problem->initial_xmin = (int64_t)candidate->initial_xmin;
+  problem->initial_xmax = (int64_t)candidate->initial_xmax;
+}
+
+static int CoordPrepareType3BatchCandidate(CWS *Cin, PolyPointList *_P,
+                                           CoordType3BatchCandidate *candidate) {
+  int i, j;
+  Long L, R;
+
+  memset(candidate, 0, sizeof(*candidate));
+  candidate->input = Cin;
+  candidate->output = _P;
+  candidate->m = Cin->nz;
+
+  Make_CWS_Basis(Cin, &candidate->basis);
+
+  if (Cin->index == 1)
+    for (i = 0; i < Cin->N; i++)
+      candidate->X0[i] = 1;
+  else if (!Compute_X0(Cin->N - 1, Cin, candidate->X0))
+    return 0;
+
+  i = _P->n = candidate->basis.n;
+  _P->np = 0;
+  candidate->Amin[0] = 0;
+  candidate->Amin[candidate->basis.n] = j = candidate->basis.N;
+  while (--i) {
+    while (!candidate->basis.x[i - 1][--j])
+      ;
+    candidate->Amin[i] = ++j;
+  }
+
+  for (i = 0; i < candidate->basis.N; i++) {
+    candidate->Xmax[i] = 0;
+    for (j = 0; j < Cin->nw; j++)
+      if (Cin->W[j][i]) {
+        L = Cin->d[j] / Cin->W[j][i];
+        if (candidate->Xmax[i]) {
+          if (L < candidate->Xmax[i])
+            candidate->Xmax[i] = L;
+        } else
+          candidate->Xmax[i] = L;
+      }
+  }
+
+  if (!CoordShouldUseType3Frontier(Cin, 0, 0, &candidate->basis,
+                                   candidate->Amin))
+    return 0;
+
+  j = candidate->basis.n - 1;
+  i = candidate->Amin[j + 1] - 1;
+  R = candidate->basis.x[j][i];
+  if (R == 1) {
+    candidate->initial_xmin = -candidate->X0[i];
+    candidate->initial_xmax = candidate->Xmax[i] - candidate->X0[i];
+  } else {
+    candidate->initial_xmin = -PD_Floor(candidate->X0[i], R);
+    candidate->initial_xmax =
+        PD_Floor(candidate->Xmax[i] - candidate->X0[i], R);
+  }
+  while ((i--) > candidate->Amin[j]) {
+    Long Low = -candidate->X0[i], Upp = Low + candidate->Xmax[i];
+
+    R = candidate->basis.x[candidate->basis.n - 1][i];
+    if (R > 0) {
+      if (R == 1) {
+        if (candidate->initial_xmax > Upp)
+          candidate->initial_xmax = Upp;
+        if (candidate->initial_xmin < Low)
+          candidate->initial_xmin = Low;
+      } else {
+        if (candidate->initial_xmax > (L = PD_Floor(Upp, R)))
+          candidate->initial_xmax = L;
+        if (candidate->initial_xmin < (L = -PD_Floor(-Low, R)))
+          candidate->initial_xmin = L;
+      }
+    } else {
+      if (R == -1) {
+        if (candidate->initial_xmax > (-Low))
+          candidate->initial_xmax = -Low;
+        if (candidate->initial_xmin < (-Upp))
+          candidate->initial_xmin = -Upp;
+      } else {
+        if (candidate->initial_xmax > (L = PD_Floor(-Low, -R)))
+          candidate->initial_xmax = L;
+        if (candidate->initial_xmin < (L = -PD_Floor(Upp, -R)))
+          candidate->initial_xmin = L;
+      }
+    }
+  }
+
+  return 1;
+}
+
+static int CoordTryType3CudaEnumerateBatch(
+    const CoordType3BatchCandidate *candidates, int candidate_count,
+    CoordType3FrontierStats *stats) {
+  Type3BoundsCudaProblem *problems = NULL;
+  Type3BoundsCudaStats *cuda_stats = NULL;
+  uint32_t *point_counts = NULL;
+  int64_t **point_buffers = NULL;
+  char error_buffer[256] = {0};
+  int index;
+  int success = 0;
+
+  CoordType3FrontierInit();
+  if (!gCoordType3Frontier.use_cuda ||
+      (gCoordType3Frontier.cuda_context == NULL) ||
+      (gCoordType3Frontier.cuda_enumerate_batch == NULL) ||
+      (candidate_count <= 0))
+    return 0;
+
+  problems = (Type3BoundsCudaProblem *)malloc((size_t)candidate_count *
+                                              sizeof(Type3BoundsCudaProblem));
+  cuda_stats = (Type3BoundsCudaStats *)malloc((size_t)candidate_count *
+                                              sizeof(Type3BoundsCudaStats));
+  point_counts =
+      (uint32_t *)malloc((size_t)candidate_count * sizeof(uint32_t));
+  point_buffers = (int64_t **)malloc((size_t)candidate_count *
+                                     sizeof(int64_t *));
+  if ((problems == NULL) || (cuda_stats == NULL) || (point_counts == NULL) ||
+      (point_buffers == NULL))
+    CoordFatal("Unable to allocate type-3 frontier batch metadata");
+
+  for (index = 0; index < candidate_count; index++) {
+    CoordPopulateType3CudaProblem(&candidates[index], &problems[index]);
+    point_buffers[index] = (int64_t *)candidates[index].output->x;
+  }
+
+  if (gCoordType3Frontier.cuda_enumerate_batch(
+          gCoordType3Frontier.cuda_context, problems,
+          (uint32_t)candidate_count, (uint32_t)POINT_Nmax, point_buffers,
+          point_counts, cuda_stats, error_buffer, sizeof(error_buffer)) == 0) {
+    for (index = 0; index < candidate_count; index++) {
+      candidates[index].output->np = (int)point_counts[index];
+      CoordCopyFrontierStatsFromCuda(&stats[index], &cuda_stats[index]);
+    }
+    success = 1;
+  } else {
+    fprintf(stderr,
+            "# type3 frontier: CUDA enumerate batch failed (%s), falling back to cpu\n",
+            error_buffer[0] ? error_buffer : "unknown error");
+    CoordType3FrontierDisableCuda();
+  }
+
+  free(problems);
+  free(cuda_stats);
+  free(point_counts);
+  free(point_buffers);
+  return success;
+}
+
+int Make_CWS_Points_Batchable(CWS *Cin) {
+  int trace_enabled = (PALPTraceActive != NULL) && PALPTraceActive();
+  int timing_enabled =
+      (CombinedCWSTimingEnabled != NULL) && CombinedCWSTimingEnabled();
+  int export_enabled = timing_enabled && CoordType3BoundsExportEnabled();
+
+  CoordType3FrontierInit();
+  if (Cin == NULL)
+    return 0;
+  if (!gCoordType3Frontier.enabled || !gCoordType3Frontier.use_cuda ||
+      (gCoordType3Frontier.cuda_enumerate_batch == NULL))
+    return 0;
+  if (trace_enabled || export_enabled)
+    return 0;
+  if ((Cin->nw != 2) || (Cin->N != 7))
+    return 0;
+  return 1;
+}
+
+void Make_CWS_Points_Batch(CWS *candidates, PolyPointList **outputs,
+                           int candidate_count, double *make_seconds) {
+  CoordType3BatchCandidate *prepared = NULL;
+  CoordType3FrontierStats *frontier_stats = NULL;
+  double *prep_seconds = NULL;
+  double enum_seconds = 0.0;
+  unsigned long long seed_interval_empty_count = 0;
+  unsigned long long tighten_interval_empty_count = 0;
+  unsigned long long zero_range_fail_count = 0;
+  unsigned long long seed_singleton_count = 0;
+  unsigned long long tighten_singleton_count = 0;
+  unsigned long long singleton_remaining_constraint_count = 0;
+  unsigned long long zero_constraint_count = 0;
+  unsigned long long nonzero_constraint_count = 0;
+  unsigned long long skipped_constraint_count = 0;
+  int timing_enabled =
+      (CombinedCWSTimingEnabled != NULL) && CombinedCWSTimingEnabled();
+  int trace_enabled = (PALPTraceActive != NULL) && PALPTraceActive();
+  int export_enabled = timing_enabled && CoordType3BoundsExportEnabled();
+  int index;
+  int use_batch = 1;
+
+  if ((candidates == NULL) || (outputs == NULL) || (candidate_count <= 0))
+    return;
+
+  CoordType3FrontierInit();
+
+  if (trace_enabled || export_enabled ||
+      !gCoordType3Frontier.use_cuda ||
+      (gCoordType3Frontier.cuda_enumerate_batch == NULL) ||
+      (candidate_count < 2))
+    use_batch = 0;
+
+  prepared = (CoordType3BatchCandidate *)malloc((size_t)candidate_count *
+                                                sizeof(CoordType3BatchCandidate));
+  frontier_stats = (CoordType3FrontierStats *)malloc((size_t)candidate_count *
+                                                     sizeof(CoordType3FrontierStats));
+  prep_seconds = (double *)malloc((size_t)candidate_count * sizeof(double));
+  if ((prepared == NULL) || (frontier_stats == NULL) || (prep_seconds == NULL))
+    CoordFatal("Unable to allocate type-3 candidate batch state");
+
+  if (use_batch) {
+    for (index = 0; index < candidate_count; index++) {
+      double start_seconds = CoordTraceNowSeconds();
+
+      if (outputs[index] == NULL) {
+        use_batch = 0;
+        break;
+      }
+      memset(&frontier_stats[index], 0, sizeof(frontier_stats[index]));
+      if (!CoordPrepareType3BatchCandidate(&candidates[index], outputs[index],
+                                           &prepared[index])) {
+        use_batch = 0;
+        break;
+      }
+      prep_seconds[index] = CoordTraceNowSeconds() - start_seconds;
+    }
+  }
+
+  if (use_batch) {
+    double start_seconds = CoordTraceNowSeconds();
+
+    if (!CoordTryType3CudaEnumerateBatch(prepared, candidate_count,
+                                         frontier_stats))
+      use_batch = 0;
+    else
+      enum_seconds = CoordTraceNowSeconds() - start_seconds;
+  }
+
+  if (use_batch) {
+    double per_candidate_enum_seconds = enum_seconds / (double)candidate_count;
+
+    for (index = 0; index < candidate_count; index++) {
+      double finalize_seconds = 0.0;
+
+      seed_interval_empty_count +=
+          frontier_stats[index].seed_interval_empty_count;
+      tighten_interval_empty_count +=
+          frontier_stats[index].tighten_interval_empty_count;
+      zero_range_fail_count += frontier_stats[index].zero_range_fail_count;
+      seed_singleton_count += frontier_stats[index].seed_singleton_count;
+      tighten_singleton_count += frontier_stats[index].tighten_singleton_count;
+      singleton_remaining_constraint_count +=
+          frontier_stats[index].singleton_remaining_constraint_count;
+      zero_constraint_count += frontier_stats[index].zero_constraint_count;
+      nonzero_constraint_count += frontier_stats[index].nonzero_constraint_count;
+      skipped_constraint_count += frontier_stats[index].skipped_constraint_count;
+
+      if (prepared[index].m) {
+        double start_seconds = CoordTraceNowSeconds();
+        int m = prepared[index].m;
+        Long G[POLY_Dmax][POLY_Dmax], M[POLY_Dmax];
+
+        CWS_2_SublatZ(prepared[index].input, &prepared[index].basis, &m, M, G);
+        Reduce_PPL_2_Sublat(prepared[index].output, &m, M, G);
+        finalize_seconds = CoordTraceNowSeconds() - start_seconds;
+      }
+
+      if (make_seconds != NULL)
+        make_seconds[index] = prep_seconds[index] +
+                              per_candidate_enum_seconds + finalize_seconds;
+    }
+
+    if (timing_enabled)
+      CoordRecordMakeCWSPointsBranchStats(
+          0, seed_interval_empty_count, tighten_interval_empty_count,
+          zero_range_fail_count, seed_singleton_count,
+          tighten_singleton_count, singleton_remaining_constraint_count,
+          zero_constraint_count, nonzero_constraint_count,
+          skipped_constraint_count);
+
+    free(prepared);
+    free(frontier_stats);
+    free(prep_seconds);
+    return;
+  }
+
+  free(prepared);
+  free(frontier_stats);
+  free(prep_seconds);
+
+  for (index = 0; index < candidate_count; index++) {
+    double start_seconds = CoordTraceNowSeconds();
+
+    Make_CWS_Points(&candidates[index], outputs[index]);
+    if (make_seconds != NULL)
+      make_seconds[index] = CoordTraceNowSeconds() - start_seconds;
+  }
 }
 
 static void CoordBuildType3BoundsJob(const CWLatticeBasis *B,

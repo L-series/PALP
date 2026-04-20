@@ -76,6 +76,16 @@ typedef struct {
 } CWSPrintWorkspace;
 
 typedef struct {
+  int initialized;
+  int finalizer_registered;
+  unsigned int capacity;
+  unsigned int count;
+  CWS *candidates;
+  PolyPointList **points;
+  double *make_seconds;
+} CWSPrintBatchState;
+
+typedef struct {
   unsigned long long candidate_index;
   double total_seconds;
   double make_cws_points_seconds;
@@ -120,6 +130,7 @@ typedef struct {
 
 static Dim5RuntimeOptions gDim5RuntimeOptions = {1, 0};
 static CWSPrintWorkspace gCWSPrintWorkspace = {NULL, NULL};
+static CWSPrintBatchState gCWSPrintBatch = {0};
 static int gCombinedCWSIPOnly = 0;
 static CombinedCWSTimingState gCombinedCWSTiming = {0};
 
@@ -242,6 +253,8 @@ void Init_IP_CWS(int narg, char *fn[]);
 void Make_5_CWS(int structure_id);
 void IP_Poly_Data(int narg, char *fn[]);
 void Make_CWS_Points(CWS *, PolyPointList *);
+int Make_CWS_Points_Batchable(CWS *);
+void Make_CWS_Points_Batch(CWS *, PolyPointList **, int, double *);
 void Npoly2cws(int narg, char *fn[]);
 void RgcWeights(int narg, char *fn[]);
 void AddHalf(void);
@@ -2402,6 +2415,122 @@ static void PrintCombinedCWSTimingSummary(void) {
   fflush(stderr);
 }
 
+static unsigned int ParseCombinedCWSBatchEnv(const char *name,
+                                             unsigned int default_value) {
+  const char *value = getenv(name);
+  char *end = NULL;
+  unsigned long parsed;
+
+  if ((value == NULL) || (*value == '\0'))
+    return default_value;
+  parsed = strtoul(value, &end, 10);
+  if ((end == value) || (*end != '\0'))
+    return default_value;
+  if (parsed == 0)
+    return 1;
+  if (parsed > 8)
+    return 8;
+  return (unsigned int)parsed;
+}
+
+static void FlushCWSPrintBatch(void);
+
+static void CWSPrintBatchFinalize(void) {
+  FlushCWSPrintBatch();
+}
+
+static void EnsureCWSPrintBatchInitialized(void) {
+  if (gCWSPrintBatch.initialized)
+    return;
+
+  gCWSPrintBatch.initialized = 1;
+  gCWSPrintBatch.capacity =
+      ParseCombinedCWSBatchEnv("PALP_TYPE3_CUDA_CANDIDATE_BATCH", 1);
+  if (gCWSPrintBatch.capacity < 2)
+    return;
+
+  gCWSPrintBatch.candidates =
+      (CWS *)calloc(gCWSPrintBatch.capacity, sizeof(CWS));
+  gCWSPrintBatch.points = (PolyPointList **)calloc(gCWSPrintBatch.capacity,
+                                                   sizeof(PolyPointList *));
+  gCWSPrintBatch.make_seconds =
+      (double *)calloc(gCWSPrintBatch.capacity, sizeof(double));
+  if ((gCWSPrintBatch.candidates == NULL) || (gCWSPrintBatch.points == NULL) ||
+      (gCWSPrintBatch.make_seconds == NULL))
+    Die("Unable to allocate combined-CWS print batch state");
+
+  if (!gCWSPrintBatch.finalizer_registered) {
+    atexit(CWSPrintBatchFinalize);
+    gCWSPrintBatch.finalizer_registered = 1;
+  }
+}
+
+static PolyPointList *EnsureCWSPrintBatchPointBuffer(unsigned int index) {
+  if (gCWSPrintBatch.points[index] == NULL) {
+    gCWSPrintBatch.points[index] =
+        (PolyPointList *)malloc(sizeof(PolyPointList));
+    if (gCWSPrintBatch.points[index] == NULL)
+      Die("Unable to allocate combined-CWS batch point buffer");
+  }
+  return gCWSPrintBatch.points[index];
+}
+
+static int CWSPrintBatchCanQueue(CWS *CW) {
+  EnsureCWSPrintBatchInitialized();
+  if (!gCombinedCWSIPOnly)
+    return 0;
+  if (gCWSPrintBatch.capacity < 2)
+    return 0;
+  return Make_CWS_Points_Batchable(CW);
+}
+
+static void FlushCWSPrintBatch(void) {
+  unsigned int index;
+
+  if (gCWSPrintBatch.count == 0)
+    return;
+
+  for (index = 0; index < gCWSPrintBatch.count; index++)
+    EnsureCWSPrintBatchPointBuffer(index);
+
+  Make_CWS_Points_Batch(gCWSPrintBatch.candidates, gCWSPrintBatch.points,
+                        (int)gCWSPrintBatch.count,
+                        gCWSPrintBatch.make_seconds);
+
+  for (index = 0; index < gCWSPrintBatch.count; index++) {
+    EqList E;
+    VertexNumList V;
+    int ip_is_ok;
+    double stage_start = 0.0;
+    int timing_enabled = CombinedCWSTimingEnabled();
+
+    CombinedCWSTimingBeginCandidate();
+    CombinedCWSTimingRecordMakeCWSPoints(gCWSPrintBatch.make_seconds[index]);
+    if (timing_enabled)
+      stage_start = CombinedCWSTimingNowSeconds();
+    ip_is_ok = IP_Check(gCWSPrintBatch.points[index], &V, &E);
+    if (timing_enabled)
+      CombinedCWSTimingRecordIPCheck(CombinedCWSTimingNowSeconds() - stage_start);
+    if (ip_is_ok) {
+      Print_CWS(&gCWSPrintBatch.candidates[index]);
+      fprintf(outFILE, "\n");
+      CombinedCWSTimingFinalizeCandidate(1);
+    } else
+      CombinedCWSTimingFinalizeCandidate(0);
+  }
+
+  gCWSPrintBatch.count = 0;
+}
+
+static void QueueCWSPrintBatchCandidate(CWS *CW) {
+  EnsureCWSPrintBatchInitialized();
+  gCWSPrintBatch.candidates[gCWSPrintBatch.count] = *CW;
+  gCWSPrintBatch.candidates[gCWSPrintBatch.count].index = 1;
+  gCWSPrintBatch.count++;
+  if (gCWSPrintBatch.count >= gCWSPrintBatch.capacity)
+    FlushCWSPrintBatch();
+}
+
 static int Dim5RuntimeOptionsModified(void) {
   return (gDim5RuntimeOptions.shard_count != 1) ||
          (gDim5RuntimeOptions.shard_index != 0);
@@ -2914,6 +3043,11 @@ void PRINT_CWS(CWS *CW) {
     }
     P = gCWSPrintWorkspace.P;
     DP = gCWSPrintWorkspace.DP;
+    if (CWSPrintBatchCanQueue(CW)) {
+      QueueCWSPrintBatchCandidate(CW);
+      return;
+    }
+    FlushCWSPrintBatch();
     timing_enabled = CombinedCWSTimingEnabled();
     CombinedCWSTimingBeginCandidate();
     CW->index = 1;
@@ -4042,6 +4176,7 @@ void Make_IP_CWS(int narg, char *fn[]) {
     if (AUXFILE[i] != NULL)
       fclose(AUXFILE[i]);
   }
+  FlushCWSPrintBatch();
   PrintCombinedCWSTimingSummary();
 }
 

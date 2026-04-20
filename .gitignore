@@ -6,3 +6,4 @@
 
 # Local benchmark corpora and derived PALP outputs
 cws/
+.palp-dim5-cache/
