@@ -34,18 +34,19 @@ cleanall: ;	rm -f *.o *.x core
 
 
 poly:	poly.o  $(OBJECTS) LG.o  Global.h LG.h
-	$(CC)   $(CFLAGS) -o  poly.x  poly.o  $(OBJECTS) LG.o
+	$(CC)   $(CFLAGS) -o  poly.x  poly.o  $(OBJECTS) LG.o -ldl
 
 class:	class.o $(OBJECTS) $(CLASS_OBJ) Global.h Subpoly.h
-	$(CC)   $(CFLAGS) -o class.x  class.o $(OBJECTS) $(CLASS_OBJ)
+	$(CC)   $(CFLAGS) -o class.x  class.o $(OBJECTS) $(CLASS_OBJ) -ldl
 
 cws:    cws.o   $(OBJECTS) LG.o Global.h LG.h
-	$(CC)   $(CFLAGS) -o cws.x  cws.o $(OBJECTS) LG.o
+	$(CC)   $(CFLAGS) -o cws.x  cws.o $(OBJECTS) LG.o -ldl
 
 nef:    nef.o   $(OBJECTS) $(NEF_OBJ) Global.h 
-	$(CC)   $(CFLAGS) -o  nef.x  nef.o  $(OBJECTS) $(NEF_OBJ)
+	$(CC)   $(CFLAGS) -o  nef.x  nef.o  $(OBJECTS) $(NEF_OBJ) -ldl
 	
-mori:   mori.o $(OBJECTS) $(MORI_OBJ) Global.h $(CC)   $(CFLAGS) -o  mori.x  mori.o  $(OBJECTS) $(MORI_OBJ)
+mori:   mori.o $(OBJECTS) $(MORI_OBJ) Global.h
+	$(CC)   $(CFLAGS) -o  mori.x  mori.o  $(OBJECTS) $(MORI_OBJ) -ldl
 
 
 

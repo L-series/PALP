@@ -1,5 +1,10 @@
 #include "Global.h"
 #include "Rat.h"
+#include "../src/verify/type3_bounds_bench_common.h"
+
+#ifdef __linux__
+#include <dlfcn.h>
+#endif
 
 #undef TEST_Wbase
 #undef USE_Old_Wbase
@@ -53,6 +58,640 @@ static void CoordRecordMakeCWSPointsBranchStats(
   unsigned long long nonzero_constraint_count,
   unsigned long long skipped_constraint_count)
   __attribute__((no_instrument_function));
+typedef struct {
+  int initialized;
+  int enabled;
+  int finalizer_registered;
+  unsigned long long exported_count;
+  unsigned long long skipped_count;
+  unsigned long long max_records;
+  FILE *file;
+  Type3BoundsFileHeader header;
+} CoordType3BoundsExportState;
+
+static CoordType3BoundsExportState gCoordType3BoundsExport = {0};
+
+static unsigned long long CoordParseUnsignedLongLongEnv(
+    const char *name, unsigned long long default_value)
+    __attribute__((no_instrument_function));
+static void CoordType3BoundsExportFinalize(void)
+    __attribute__((no_instrument_function));
+static void CoordType3BoundsExportInit(void)
+    __attribute__((no_instrument_function));
+static int CoordType3BoundsExportEnabled(void)
+    __attribute__((no_instrument_function));
+static void CoordType3BoundsExportSkip(void)
+    __attribute__((no_instrument_function));
+static void CoordType3BoundsExportRecord(Type3BoundsRecord *record)
+    __attribute__((no_instrument_function));
+
+static unsigned long long CoordParseUnsignedLongLongEnv(
+    const char *name, unsigned long long default_value) {
+  const char *value = getenv(name);
+  char *end = NULL;
+  unsigned long long parsed;
+
+  if ((value == NULL) || (*value == '\0'))
+    return default_value;
+  parsed = strtoull(value, &end, 10);
+  if ((end == value) || (*end != '\0'))
+    return default_value;
+  return parsed;
+}
+
+static void CoordType3BoundsExportFinalize(void) {
+  if (gCoordType3BoundsExport.file == NULL)
+    return;
+
+  gCoordType3BoundsExport.header.job_count =
+      (uint32_t)gCoordType3BoundsExport.exported_count;
+  rewind(gCoordType3BoundsExport.file);
+  fwrite(&gCoordType3BoundsExport.header,
+         sizeof(gCoordType3BoundsExport.header), 1,
+         gCoordType3BoundsExport.file);
+  fclose(gCoordType3BoundsExport.file);
+  gCoordType3BoundsExport.file = NULL;
+
+  fprintf(stderr,
+          "# type3-bounds export: wrote %llu records",
+          gCoordType3BoundsExport.exported_count);
+  if (gCoordType3BoundsExport.skipped_count)
+    fprintf(stderr, " (%llu skipped)", gCoordType3BoundsExport.skipped_count);
+  fprintf(stderr, "\n");
+}
+
+static void CoordType3BoundsExportInit(void) {
+  const char *path;
+
+  if (gCoordType3BoundsExport.initialized)
+    return;
+  gCoordType3BoundsExport.initialized = 1;
+
+  path = getenv("PALP_TYPE3_BOUNDS_EXPORT");
+  if ((path == NULL) || (*path == '\0'))
+    return;
+
+  gCoordType3BoundsExport.max_records = CoordParseUnsignedLongLongEnv(
+      "PALP_TYPE3_BOUNDS_EXPORT_LIMIT", 1000000ull);
+  if (gCoordType3BoundsExport.max_records == 0)
+    gCoordType3BoundsExport.max_records = ~0ull;
+
+  gCoordType3BoundsExport.file = fopen(path, "wb");
+  if (gCoordType3BoundsExport.file == NULL) {
+    fprintf(stderr, "Unable to open %s for type3 bounds export\n", path);
+    return;
+  }
+
+  memset(&gCoordType3BoundsExport.header, 0,
+         sizeof(gCoordType3BoundsExport.header));
+  gCoordType3BoundsExport.header.magic = kType3BoundsMagic;
+  gCoordType3BoundsExport.header.version = kType3BoundsVersion;
+  gCoordType3BoundsExport.header.dataset_kind =
+      kType3BoundsDatasetCoordTiming;
+  gCoordType3BoundsExport.header.max_constraints =
+      kType3BoundsMaxConstraints;
+  fwrite(&gCoordType3BoundsExport.header,
+         sizeof(gCoordType3BoundsExport.header), 1,
+         gCoordType3BoundsExport.file);
+
+  if (!gCoordType3BoundsExport.finalizer_registered) {
+    atexit(CoordType3BoundsExportFinalize);
+    gCoordType3BoundsExport.finalizer_registered = 1;
+  }
+  gCoordType3BoundsExport.enabled = 1;
+}
+
+static int CoordType3BoundsExportEnabled(void) {
+  CoordType3BoundsExportInit();
+  return gCoordType3BoundsExport.enabled &&
+         (gCoordType3BoundsExport.file != NULL) &&
+         (gCoordType3BoundsExport.exported_count <
+          gCoordType3BoundsExport.max_records);
+}
+
+static void CoordType3BoundsExportSkip(void) {
+  CoordType3BoundsExportInit();
+  if (gCoordType3BoundsExport.enabled)
+    gCoordType3BoundsExport.skipped_count++;
+}
+
+static void CoordType3BoundsExportRecord(Type3BoundsRecord *record) {
+  Type3BoundsResult actual;
+
+  CoordType3BoundsExportInit();
+  if (!gCoordType3BoundsExport.enabled ||
+      (gCoordType3BoundsExport.file == NULL) ||
+      (gCoordType3BoundsExport.exported_count >=
+       gCoordType3BoundsExport.max_records))
+    return;
+
+  actual = EvaluateType3BoundsJob(&record->job);
+  if (!Type3BoundsResultsEqual(&actual, &record->expected)) {
+    fprintf(stderr,
+            "type3 bounds export mismatch @ pending ordinal %llu\n",
+            gCoordType3BoundsExport.exported_count + 1);
+    fprintf(stderr,
+            "expected xmin=%d xmax=%d flags=%u steps=%u but got xmin=%d xmax=%d flags=%u steps=%u\n",
+            record->expected.xmin, record->expected.xmax,
+            record->expected.flags, record->expected.steps, actual.xmin,
+            actual.xmax, actual.flags, actual.steps);
+    exit(1);
+  }
+
+  record->ordinal = gCoordType3BoundsExport.exported_count + 1;
+  if (fwrite(record, sizeof(*record), 1, gCoordType3BoundsExport.file) != 1) {
+    fprintf(stderr, "Failed writing type3 bounds export record\n");
+    exit(1);
+  }
+  gCoordType3BoundsExport.exported_count++;
+}
+
+typedef struct {
+  Long x[POLY_Dmax];
+} CoordFrontierState;
+
+typedef struct {
+  CoordFrontierState *items;
+  unsigned long long count;
+  unsigned long long capacity;
+} CoordFrontierList;
+
+typedef struct CoordType3CudaContext CoordType3CudaContext;
+
+typedef int (*CoordType3CudaCreateFn)(CoordType3CudaContext **context,
+                                      uint32_t capacity,
+                                      uint32_t block_size,
+                                      char *error_buffer,
+                                      size_t error_buffer_size);
+typedef int (*CoordType3CudaEvaluateFn)(CoordType3CudaContext *context,
+                                        const Type3BoundsJob *jobs,
+                                        Type3BoundsResult *results,
+                                        uint32_t job_count,
+                                        char *error_buffer,
+                                        size_t error_buffer_size);
+typedef void (*CoordType3CudaDestroyFn)(CoordType3CudaContext *context);
+
+typedef struct {
+  int initialized;
+  int enabled;
+  int use_cuda;
+  int verbose;
+  int finalizer_registered;
+  unsigned int batch_size;
+  unsigned int block_size;
+#ifdef __linux__
+  void *library_handle;
+#endif
+  CoordType3CudaContext *cuda_context;
+  CoordType3CudaCreateFn cuda_create;
+  CoordType3CudaEvaluateFn cuda_evaluate;
+  CoordType3CudaDestroyFn cuda_destroy;
+} CoordType3FrontierConfig;
+
+typedef struct {
+  unsigned long long seed_interval_empty_count;
+  unsigned long long tighten_interval_empty_count;
+  unsigned long long zero_range_fail_count;
+  unsigned long long seed_singleton_count;
+  unsigned long long tighten_singleton_count;
+  unsigned long long singleton_remaining_constraint_count;
+  unsigned long long zero_constraint_count;
+  unsigned long long nonzero_constraint_count;
+  unsigned long long skipped_constraint_count;
+} CoordType3FrontierStats;
+
+static CoordType3FrontierConfig gCoordType3Frontier = {0};
+
+static void CoordFatal(const char *message) {
+  fprintf(stderr, "%s\n", message);
+  exit(0);
+}
+
+static void CoordFrontierListInit(CoordFrontierList *list) {
+  list->items = NULL;
+  list->count = 0;
+  list->capacity = 0;
+}
+
+static void CoordFrontierListFree(CoordFrontierList *list) {
+  free(list->items);
+  list->items = NULL;
+  list->count = 0;
+  list->capacity = 0;
+}
+
+static void CoordEnsureFrontierListCapacity(CoordFrontierList *list,
+                                            unsigned long long min_capacity) {
+  unsigned long long new_capacity;
+  CoordFrontierState *new_items;
+
+  if (list->capacity >= min_capacity)
+    return;
+
+  new_capacity = list->capacity ? (2 * list->capacity) : 1024;
+  while (new_capacity < min_capacity)
+    new_capacity *= 2;
+
+  new_items = (CoordFrontierState *)realloc(
+      list->items, (size_t)new_capacity * sizeof(CoordFrontierState));
+  if (new_items == NULL)
+    CoordFatal("Unable to allocate type-3 frontier states");
+
+  list->items = new_items;
+  list->capacity = new_capacity;
+}
+
+static CoordFrontierState *CoordAppendFrontierState(CoordFrontierList *list) {
+  CoordEnsureFrontierListCapacity(list, list->count + 1);
+  return &list->items[list->count++];
+}
+
+static unsigned int CoordMaxType3ConstraintCount(const int *Amin, int n) {
+  unsigned int max_constraints = 0;
+  int coord;
+
+  for (coord = 0; coord < (n - 1); coord++) {
+    int segment_size = Amin[coord + 1] - Amin[coord];
+
+    if ((segment_size > 1) &&
+        ((unsigned int)(segment_size - 1) > max_constraints))
+      max_constraints = (unsigned int)(segment_size - 1);
+  }
+  return max_constraints;
+}
+
+static void CoordType3FrontierDisableCuda(void) {
+  if ((gCoordType3Frontier.cuda_context != NULL) &&
+      (gCoordType3Frontier.cuda_destroy != NULL))
+    gCoordType3Frontier.cuda_destroy(gCoordType3Frontier.cuda_context);
+  gCoordType3Frontier.cuda_context = NULL;
+#ifdef __linux__
+  if (gCoordType3Frontier.library_handle != NULL)
+    dlclose(gCoordType3Frontier.library_handle);
+  gCoordType3Frontier.library_handle = NULL;
+#endif
+  gCoordType3Frontier.cuda_create = NULL;
+  gCoordType3Frontier.cuda_evaluate = NULL;
+  gCoordType3Frontier.cuda_destroy = NULL;
+  gCoordType3Frontier.use_cuda = 0;
+}
+
+static void CoordType3FrontierFinalize(void) {
+  CoordType3FrontierDisableCuda();
+}
+
+static int CoordType3FrontierModeIsDisabled(const char *value) {
+  return (strcmp(value, "0") == 0) || (strcmp(value, "off") == 0) ||
+         (strcmp(value, "false") == 0);
+}
+
+static void CoordType3FrontierInit(void) {
+  const char *mode = getenv("PALP_TYPE3_FRONTIER");
+
+  if (gCoordType3Frontier.initialized)
+    return;
+  gCoordType3Frontier.initialized = 1;
+
+  if ((mode == NULL) || (*mode == '\0') || CoordType3FrontierModeIsDisabled(mode))
+    return;
+
+  gCoordType3Frontier.enabled = 1;
+  gCoordType3Frontier.batch_size = (unsigned int)CoordParseUnsignedLongLongEnv(
+      "PALP_TYPE3_FRONTIER_BATCH", 65536ull);
+  gCoordType3Frontier.block_size = (unsigned int)CoordParseUnsignedLongLongEnv(
+      "PALP_TYPE3_CUDA_BLOCK", 128ull);
+  gCoordType3Frontier.verbose =
+      CoordParseUnsignedLongLongEnv("PALP_TYPE3_FRONTIER_VERBOSE", 0ull) != 0;
+
+  if (gCoordType3Frontier.batch_size == 0)
+    gCoordType3Frontier.batch_size = 1;
+  if (gCoordType3Frontier.block_size == 0)
+    gCoordType3Frontier.block_size = 128;
+
+  if (!gCoordType3Frontier.finalizer_registered) {
+    atexit(CoordType3FrontierFinalize);
+    gCoordType3Frontier.finalizer_registered = 1;
+  }
+
+  if (strcmp(mode, "cuda") == 0) {
+#ifdef __linux__
+    const char *runtime_path = getenv("PALP_TYPE3_CUDA_RUNTIME");
+    char error_buffer[256] = {0};
+
+    if ((runtime_path == NULL) || (*runtime_path == '\0')) {
+      if (gCoordType3Frontier.verbose)
+        fprintf(stderr,
+                "# type3 frontier: PALP_TYPE3_CUDA_RUNTIME not set, falling back to cpu\n");
+    } else if ((gCoordType3Frontier.library_handle =
+                    dlopen(runtime_path, RTLD_NOW | RTLD_LOCAL)) == NULL) {
+      if (gCoordType3Frontier.verbose)
+        fprintf(stderr,
+                "# type3 frontier: unable to load %s (%s), falling back to cpu\n",
+                runtime_path, dlerror());
+    } else {
+      gCoordType3Frontier.cuda_create =
+          (CoordType3CudaCreateFn)dlsym(gCoordType3Frontier.library_handle,
+                                        "Type3BoundsCudaCreate");
+      gCoordType3Frontier.cuda_evaluate =
+          (CoordType3CudaEvaluateFn)dlsym(gCoordType3Frontier.library_handle,
+                                          "Type3BoundsCudaEvaluate");
+      gCoordType3Frontier.cuda_destroy =
+          (CoordType3CudaDestroyFn)dlsym(gCoordType3Frontier.library_handle,
+                                         "Type3BoundsCudaDestroy");
+      if ((gCoordType3Frontier.cuda_create == NULL) ||
+          (gCoordType3Frontier.cuda_evaluate == NULL) ||
+          (gCoordType3Frontier.cuda_destroy == NULL)) {
+        if (gCoordType3Frontier.verbose)
+          fprintf(stderr,
+                  "# type3 frontier: %s missing required CUDA entry points, falling back to cpu\n",
+                  runtime_path);
+        CoordType3FrontierDisableCuda();
+      } else if (gCoordType3Frontier.cuda_create(
+                     &gCoordType3Frontier.cuda_context,
+                     (uint32_t)gCoordType3Frontier.batch_size,
+                     (uint32_t)gCoordType3Frontier.block_size,
+                     error_buffer, sizeof(error_buffer)) == 0) {
+        gCoordType3Frontier.use_cuda = 1;
+      } else {
+        if (gCoordType3Frontier.verbose)
+          fprintf(stderr,
+                  "# type3 frontier: CUDA initialization failed (%s), falling back to cpu\n",
+                  error_buffer[0] ? error_buffer : "unknown error");
+        CoordType3FrontierDisableCuda();
+      }
+    }
+#else
+    if (gCoordType3Frontier.verbose)
+      fprintf(stderr,
+              "# type3 frontier: CUDA mode requested on a non-Linux build, falling back to cpu\n");
+#endif
+  }
+
+  if (gCoordType3Frontier.verbose)
+    fprintf(stderr, "# type3 frontier: mode=%s batch=%u block=%u\n",
+            gCoordType3Frontier.use_cuda ? "cuda" : "cpu",
+            gCoordType3Frontier.batch_size,
+            gCoordType3Frontier.block_size);
+}
+
+static int CoordType3FrontierEnabled(void) {
+  CoordType3FrontierInit();
+  return gCoordType3Frontier.enabled;
+}
+
+static unsigned int CoordType3FrontierBatchSize(void) {
+  CoordType3FrontierInit();
+  return gCoordType3Frontier.batch_size ? gCoordType3Frontier.batch_size : 1;
+}
+
+static void CoordEvaluateType3BoundsCpu(const Type3BoundsJob *jobs,
+                                        Type3BoundsResult *results,
+                                        unsigned int job_count) {
+  unsigned int index;
+
+  for (index = 0; index < job_count; index++)
+    results[index] = EvaluateType3BoundsJob(&jobs[index]);
+}
+
+static void CoordEvaluateType3BoundsBatch(const Type3BoundsJob *jobs,
+                                          Type3BoundsResult *results,
+                                          unsigned int job_count) {
+  char error_buffer[256] = {0};
+
+  CoordType3FrontierInit();
+  if (gCoordType3Frontier.use_cuda &&
+      (gCoordType3Frontier.cuda_context != NULL) &&
+      (gCoordType3Frontier.cuda_evaluate != NULL) &&
+      (job_count > 0)) {
+    if (gCoordType3Frontier.cuda_evaluate(gCoordType3Frontier.cuda_context,
+                                          jobs, results, (uint32_t)job_count,
+                                          error_buffer,
+                                          sizeof(error_buffer)) == 0)
+      return;
+
+    fprintf(stderr,
+            "# type3 frontier: CUDA batch failed (%s), falling back to cpu\n",
+            error_buffer[0] ? error_buffer : "unknown error");
+    CoordType3FrontierDisableCuda();
+  }
+
+  CoordEvaluateType3BoundsCpu(jobs, results, job_count);
+}
+
+static int CoordShouldUseType3Frontier(CWS *Cin, int trace_enabled,
+                                       int export_enabled,
+                                       const CWLatticeBasis *B,
+                                       const int *Amin) {
+  if (!CoordType3FrontierEnabled())
+    return 0;
+  if (trace_enabled || export_enabled)
+    return 0;
+  if ((Cin->nw != 2) || (Cin->N != 7))
+    return 0;
+  if (B->n < 2)
+    return 0;
+  if (CoordMaxType3ConstraintCount(Amin, B->n) >
+      kType3BoundsMaxConstraints)
+    return 0;
+  return 1;
+}
+
+static void CoordBuildType3BoundsJob(const CWLatticeBasis *B,
+                                     const int *Amin, const Long *X0,
+                                     const Long *Xmax, int coord,
+                                     const CoordFrontierState *state,
+                                     Type3BoundsJob *job) {
+  int i, k;
+  Long Low, Upp, R;
+
+  memset(job, 0, sizeof(*job));
+  i = Amin[coord + 1] - 1;
+  Low = -X0[i];
+  for (k = coord + 1; k < B->n; k++)
+    Low -= state->x[k] * B->x[k][i];
+  Upp = Xmax[i] + Low;
+  R = B->x[coord][i];
+
+  job->seed_low = (int32_t)Low;
+  job->seed_upp = (int32_t)Upp;
+  job->seed_r = (int32_t)R;
+
+  while ((i--) > Amin[coord]) {
+    uint32_t constraint_index = job->constraint_count;
+
+    if (constraint_index >= kType3BoundsMaxConstraints)
+      CoordFatal("type-3 frontier exceeded job constraint capacity");
+
+    R = B->x[coord][i];
+    if (R != 0) {
+      Low = -X0[i];
+      for (k = coord + 1; k < B->n; k++)
+        Low -= state->x[k] * B->x[k][i];
+      Upp = Xmax[i] + Low;
+      job->low[constraint_index] = (int32_t)Low;
+      job->upp[constraint_index] = (int32_t)Upp;
+      job->r[constraint_index] = (int32_t)R;
+    } else {
+      Long X = 1;
+
+      for (k = coord + 1; k < B->n; k++)
+        X += state->x[k] * B->x[k][i];
+      job->low[constraint_index] = 0;
+      job->upp[constraint_index] = 0;
+      job->r[constraint_index] = 0;
+      job->zero_x[constraint_index] = (int32_t)X;
+      job->zero_xmax[constraint_index] = (int32_t)Xmax[i];
+    }
+    job->constraint_count++;
+  }
+}
+
+static void CoordAccumulateType3BoundsStats(
+    const Type3BoundsJob *job, const Type3BoundsResult *result,
+    CoordType3FrontierStats *stats) {
+  unsigned int processed_constraints = 0;
+  unsigned int remaining_constraints;
+  unsigned int i;
+
+  if (result->steps > 0)
+    processed_constraints = result->steps - 1;
+  if (processed_constraints > job->constraint_count)
+    processed_constraints = job->constraint_count;
+
+  for (i = 0; i < processed_constraints; i++) {
+    if (job->r[i] == 0)
+      stats->zero_constraint_count++;
+    else
+      stats->nonzero_constraint_count++;
+  }
+
+  remaining_constraints = job->constraint_count - processed_constraints;
+  stats->skipped_constraint_count += remaining_constraints;
+
+  if (result->flags & kType3BoundsFlagSeedEmpty) {
+    stats->seed_interval_empty_count++;
+    return;
+  }
+  if (result->flags & kType3BoundsFlagTightenEmpty)
+    stats->tighten_interval_empty_count++;
+  if (result->flags & kType3BoundsFlagZeroFail)
+    stats->zero_range_fail_count++;
+
+  if ((result->flags & kType3BoundsFlagSingleton) && remaining_constraints) {
+    stats->singleton_remaining_constraint_count += remaining_constraints;
+    if (processed_constraints == 0)
+      stats->seed_singleton_count++;
+    else
+      stats->tighten_singleton_count++;
+  }
+}
+
+static void CoordAppendPointOrDie(PolyPointList *_P,
+                                  const CoordFrontierState *state,
+                                  int coord, Long value, int n) {
+  int k;
+
+  if (_P->np >= POINT_Nmax) {
+    puts("Increase POINT_Nmax");
+    exit(0);
+  }
+
+  for (k = 0; k < n; k++)
+    _P->x[_P->np][k] = state->x[k];
+  _P->x[_P->np][coord] = value;
+  _P->np++;
+}
+
+static int CoordRunType3FrontierEnumeration(const CWLatticeBasis *B,
+                                            const int *Amin,
+                                            const Long *X0,
+                                            const Long *Xmax,
+                                            Long initial_xmin,
+                                            Long initial_xmax,
+                                            PolyPointList *_P,
+                                            CoordType3FrontierStats *stats) {
+  CoordFrontierList current, next;
+  Type3BoundsJob *jobs = NULL;
+  Type3BoundsResult *results = NULL;
+  unsigned int batch_size = CoordType3FrontierBatchSize();
+  int coord;
+  Long value;
+
+  CoordFrontierListInit(&current);
+  CoordFrontierListInit(&next);
+  _P->np = 0;
+
+  jobs = (Type3BoundsJob *)malloc((size_t)batch_size * sizeof(Type3BoundsJob));
+  results = (Type3BoundsResult *)malloc((size_t)batch_size *
+                                        sizeof(Type3BoundsResult));
+  if ((jobs == NULL) || (results == NULL))
+    CoordFatal("Unable to allocate type-3 frontier batch buffers");
+
+  if (initial_xmin > initial_xmax)
+    goto done;
+
+  for (value = initial_xmin; value <= initial_xmax; value++) {
+    CoordFrontierState *state = CoordAppendFrontierState(&current);
+
+    memset(state, 0, sizeof(*state));
+    state->x[B->n - 1] = value;
+  }
+
+  for (coord = B->n - 2; coord >= 0; coord--) {
+    unsigned long long offset;
+
+    next.count = 0;
+    for (offset = 0; offset < current.count; offset += batch_size) {
+      unsigned int count = (unsigned int)((current.count - offset) > batch_size
+                                              ? batch_size
+                                              : (current.count - offset));
+      unsigned int index;
+
+      for (index = 0; index < count; index++)
+        CoordBuildType3BoundsJob(B, Amin, X0, Xmax, coord,
+                                 &current.items[offset + index], &jobs[index]);
+
+      CoordEvaluateType3BoundsBatch(jobs, results, count);
+
+      for (index = 0; index < count; index++) {
+        CoordFrontierState *source = &current.items[offset + index];
+
+        if (stats != NULL)
+          CoordAccumulateType3BoundsStats(&jobs[index], &results[index], stats);
+        if (!(results[index].flags & kType3BoundsFlagSurvived))
+          continue;
+
+        for (value = results[index].xmin; value <= results[index].xmax; value++) {
+          if (coord == 0)
+            CoordAppendPointOrDie(_P, source, coord, value, B->n);
+          else {
+            CoordFrontierState *state = CoordAppendFrontierState(&next);
+
+            *state = *source;
+            state->x[coord] = value;
+          }
+        }
+      }
+    }
+
+    current.count = 0;
+    {
+      CoordFrontierList swap = current;
+
+      current = next;
+      next = swap;
+    }
+    if (current.count == 0)
+      break;
+  }
+
+done:
+  free(jobs);
+  free(results);
+  CoordFrontierListFree(&current);
+  CoordFrontierListFree(&next);
+  return 1;
+}
 
 static double CoordTraceNowSeconds(void) {
   struct timespec now;
@@ -1135,6 +1774,7 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
   int trace_enabled = (PALPTraceActive != NULL) && PALPTraceActive();
   int timing_enabled =
       (CombinedCWSTimingEnabled != NULL) && CombinedCWSTimingEnabled();
+  int export_enabled = timing_enabled && CoordType3BoundsExportEnabled();
   double trace_make_basis_seconds = 0.0;
   double trace_compute_x0_seconds = 0.0;
   double trace_build_amin_seconds = 0.0;
@@ -1394,6 +2034,29 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
       /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
     } /* this completes the limits for x[B.n-1] */
   }
+
+  if (CoordShouldUseType3Frontier(Cin, trace_enabled, export_enabled, &B,
+                                  Amin)) {
+    CoordType3FrontierStats frontier_stats;
+
+    memset(&frontier_stats, 0, sizeof(frontier_stats));
+    CoordRunType3FrontierEnumeration(&B, Amin, X0, Xmax, xmin[B.n - 1],
+                                     xmax[B.n - 1], _P, &frontier_stats);
+    branch_seed_interval_empty_count +=
+        frontier_stats.seed_interval_empty_count;
+    branch_tighten_interval_empty_count +=
+        frontier_stats.tighten_interval_empty_count;
+    branch_zero_range_fail_count += frontier_stats.zero_range_fail_count;
+    branch_seed_singleton_count += frontier_stats.seed_singleton_count;
+    branch_tighten_singleton_count += frontier_stats.tighten_singleton_count;
+    branch_singleton_remaining_constraint_count +=
+        frontier_stats.singleton_remaining_constraint_count;
+    branch_zero_constraint_count += frontier_stats.zero_constraint_count;
+    branch_nonzero_constraint_count += frontier_stats.nonzero_constraint_count;
+    branch_skipped_constraint_count += frontier_stats.skipped_constraint_count;
+    goto finalize_points;
+  }
+
   x[j] = xmin[j];
   if (trace_enabled) {
     double region_start = CoordTraceNowSeconds();
@@ -1573,11 +2236,22 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
         Long Upp = Xmax[i = Amin[j--] - 1], Low = -X0[i];
         int RangeFlag = 0;
         int SingletonRecorded = 0;
+        int ExportSingletonFlag = 0;
+        int ZeroFailFlag = 0;
+        int ExportRecordUsable = export_enabled;
+        Type3BoundsRecord export_record;
+
+        memset(&export_record, 0, sizeof(export_record));
 
         for (k = j + 1; k < B.n; k++)
           Low -= x[k] * B.x[k][i]; /* compute offset */
         Upp += Low;
         R = B.x[j][i];
+        if (ExportRecordUsable) {
+          export_record.job.seed_low = (int32_t)Low;
+          export_record.job.seed_upp = (int32_t)Upp;
+          export_record.job.seed_r = (int32_t)R;
+        }
         if (R == 1) {
           xmin[j] = Low;
           xmax[j] = Upp;
@@ -1591,21 +2265,47 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
           RangeFlag = 1;
           branch_seed_interval_empty_count++;
           branch_skipped_constraint_count += (unsigned long long)(i - Amin[j]);
-        } else if ((xmin[j] == xmax[j]) && (i > Amin[j])) {
-          SingletonRecorded = 1;
-          branch_seed_singleton_count++;
-          branch_singleton_remaining_constraint_count +=
-              (unsigned long long)(i - Amin[j]);
+          if (ExportRecordUsable) {
+            export_record.expected.xmin = (int32_t)xmin[j];
+            export_record.expected.xmax = (int32_t)xmax[j];
+            export_record.expected.flags = kType3BoundsFlagSeedEmpty;
+            export_record.expected.steps = 1;
+            CoordType3BoundsExportRecord(&export_record);
+          }
+        } else if (xmin[j] == xmax[j]) {
+          ExportSingletonFlag = 1;
+          if (i > Amin[j]) {
+            SingletonRecorded = 1;
+            branch_seed_singleton_count++;
+            branch_singleton_remaining_constraint_count +=
+                (unsigned long long)(i - Amin[j]);
+          }
         }
         while (!RangeFlag && ((i--) > Amin[j]))
           if ((R = B.x[j][i])) /* R!=0  => new limits */
           {
+            uint32_t constraint_index;
+
             branch_nonzero_constraint_count++;
             Low = -X0[i];
             Upp = Xmax[i];
             for (k = j + 1; k < B.n; k++)
               Low -= x[k] * B.x[k][i];
             Upp += Low;
+            if (ExportRecordUsable) {
+              constraint_index = export_record.job.constraint_count;
+              if (constraint_index >= kType3BoundsMaxConstraints) {
+                ExportRecordUsable = 0;
+                CoordType3BoundsExportSkip();
+              } else {
+                export_record.job.low[constraint_index] = (int32_t)Low;
+                export_record.job.upp[constraint_index] = (int32_t)Upp;
+                export_record.job.r[constraint_index] = (int32_t)R;
+                export_record.job.zero_x[constraint_index] = 0;
+                export_record.job.zero_xmax[constraint_index] = 0;
+                export_record.job.constraint_count++;
+              }
+            }
             if (R > 0) {
               if (R == 1) {
                 if (xmax[j] > Upp)
@@ -1636,12 +2336,14 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
               branch_tighten_interval_empty_count++;
               branch_skipped_constraint_count +=
                   (unsigned long long)(i - Amin[j]);
-            } else if (!SingletonRecorded && (xmin[j] == xmax[j]) &&
-                       (i > Amin[j])) {
-              SingletonRecorded = 1;
-              branch_tighten_singleton_count++;
-              branch_singleton_remaining_constraint_count +=
-                  (unsigned long long)(i - Amin[j]);
+            } else if (xmin[j] == xmax[j]) {
+              ExportSingletonFlag = 1;
+              if (!SingletonRecorded && (i > Amin[j])) {
+                SingletonRecorded = 1;
+                branch_tighten_singleton_count++;
+                branch_singleton_remaining_constraint_count +=
+                    (unsigned long long)(i - Amin[j]);
+              }
             }
             /** /printf("R=%2d:  %2d <= x[%d=&%d] <=
              * %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
@@ -1649,17 +2351,49 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
           else /*   when R=0 and X out of Range:  */
           {
             Long X = 1;
+            uint32_t constraint_index;
 
             branch_zero_constraint_count++;
             for (k = j + 1; k < B.n; k++)
               X += x[k] * B.x[k][i];
+            if (ExportRecordUsable) {
+              constraint_index = export_record.job.constraint_count;
+              if (constraint_index >= kType3BoundsMaxConstraints) {
+                ExportRecordUsable = 0;
+                CoordType3BoundsExportSkip();
+              } else {
+                export_record.job.low[constraint_index] = 0;
+                export_record.job.upp[constraint_index] = 0;
+                export_record.job.r[constraint_index] = 0;
+                export_record.job.zero_x[constraint_index] = (int32_t)X;
+                export_record.job.zero_xmax[constraint_index] =
+                    (int32_t)Xmax[i];
+                export_record.job.constraint_count++;
+              }
+            }
             if ((X < 0) || (X > Xmax[i])) {
               RangeFlag = 1;
+              ZeroFailFlag = 1;
               branch_zero_range_fail_count++;
               branch_skipped_constraint_count +=
                   (unsigned long long)(i - Amin[j]);
             }
           }
+        if (ExportRecordUsable && !((export_record.expected.flags) &
+                                    kType3BoundsFlagSeedEmpty)) {
+          export_record.expected.xmin = (int32_t)xmin[j];
+          export_record.expected.xmax = (int32_t)xmax[j];
+          export_record.expected.flags =
+            ExportSingletonFlag ? kType3BoundsFlagSingleton : 0;
+          if (ZeroFailFlag)
+            export_record.expected.flags |= kType3BoundsFlagZeroFail;
+          else if (RangeFlag)
+            export_record.expected.flags |= kType3BoundsFlagTightenEmpty;
+          else
+            export_record.expected.flags |= kType3BoundsFlagSurvived;
+          export_record.expected.steps = 1 + export_record.job.constraint_count;
+          CoordType3BoundsExportRecord(&export_record);
+        }
         if (RangeFlag)
           ++x[++j];
         else
@@ -1787,6 +2521,7 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
         }
       }
     }
+finalize_points:
   if (trace_enabled) {
     if (m) {
       double region_start = CoordTraceNowSeconds();
