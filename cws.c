@@ -3,9 +3,14 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifdef __linux__
+#include <dlfcn.h>
+#endif
+
 #include "Global.h"
 #include "LG.h"
 #include "Rat.h"
+#include "../src/verify/type3_bounds_runtime.h"
 
 FILE *inFILE, *outFILE;
 
@@ -85,6 +90,44 @@ typedef struct {
   double *make_seconds;
 } CWSPrintBatchState;
 
+typedef int (*Dim5CudaCreateFn)(Type3BoundsCudaContext **context,
+                                uint32_t capacity,
+                                uint32_t block_size,
+                                char *error_buffer,
+                                size_t error_buffer_size);
+typedef int (*Dim5CudaUploadWeightPoolFn)(Type3BoundsCudaContext *context,
+                                          const Type3BoundsCudaWeightEntry *weights,
+                                          uint32_t weight_count,
+                                          char *error_buffer,
+                                          size_t error_buffer_size);
+typedef int (*Dim5CudaGenerateStructure3BatchFn)(
+    Type3BoundsCudaContext *context,
+    uint64_t pair_start,
+    uint32_t pair_count,
+    Type3BoundsCudaDim5Structure3Candidate *candidates,
+    uint32_t *candidate_counts,
+    char *error_buffer,
+    size_t error_buffer_size);
+typedef void (*Dim5CudaDestroyFn)(Type3BoundsCudaContext *context);
+
+typedef struct {
+  int initialized;
+  int enabled;
+  int use_cuda;
+  int verbose;
+  int finalizer_registered;
+  unsigned int pair_batch_size;
+  unsigned int block_size;
+#ifdef __linux__
+  void *library_handle;
+#endif
+  Type3BoundsCudaContext *context;
+  Dim5CudaCreateFn cuda_create;
+  Dim5CudaUploadWeightPoolFn cuda_upload_weight_pool;
+  Dim5CudaGenerateStructure3BatchFn cuda_generate_structure3_batch;
+  Dim5CudaDestroyFn cuda_destroy;
+} Dim5CudaGeneratorConfig;
+
 typedef struct {
   unsigned long long candidate_index;
   double total_seconds;
@@ -131,6 +174,7 @@ typedef struct {
 static Dim5RuntimeOptions gDim5RuntimeOptions = {1, 0};
 static CWSPrintWorkspace gCWSPrintWorkspace = {NULL, NULL};
 static CWSPrintBatchState gCWSPrintBatch = {0};
+static Dim5CudaGeneratorConfig gDim5CudaGenerator = {0};
 static int gCombinedCWSIPOnly = 0;
 static CombinedCWSTimingState gCombinedCWSTiming = {0};
 
@@ -207,6 +251,8 @@ static void ValidateDim5RuntimeOptions(void);
 static int Dim5RuntimeOptionsModified(void);
 static void ResetCombinedCWSRuntimeOptions(void);
 static void EnableCombinedCWSIPOnlyMode(void);
+static int Dim5CudaGeneratorEnabled(void);
+static int GenerateDim5Structure3OnCuda(const Dim5WeightPool *pool);
 static void ResetCombinedCWSTimingMode(void);
 static void EnableCombinedCWSTimingMode(void);
 static void ResetCombinedCWSTimingStats(void);
@@ -2154,6 +2200,150 @@ static void EnableCombinedCWSIPOnlyMode(void) {
   gCombinedCWSIPOnly = 1;
 }
 
+static unsigned long long ParseDim5CudaEnv(const char *name,
+                                           unsigned long long default_value) {
+  const char *value = getenv(name);
+  char *end = NULL;
+  unsigned long long parsed_value;
+
+  if ((value == NULL) || (*value == '\0'))
+    return default_value;
+  parsed_value = strtoull(value, &end, 10);
+  if ((end == value) || (*end != '\0'))
+    return default_value;
+  return parsed_value;
+}
+
+static void Dim5CudaGeneratorDisable(void) {
+  if (gDim5CudaGenerator.cuda_destroy != NULL &&
+      gDim5CudaGenerator.context != NULL)
+    gDim5CudaGenerator.cuda_destroy(gDim5CudaGenerator.context);
+  gDim5CudaGenerator.context = NULL;
+#ifdef __linux__
+  if (gDim5CudaGenerator.library_handle != NULL)
+    dlclose(gDim5CudaGenerator.library_handle);
+  gDim5CudaGenerator.library_handle = NULL;
+#endif
+  gDim5CudaGenerator.cuda_create = NULL;
+  gDim5CudaGenerator.cuda_upload_weight_pool = NULL;
+  gDim5CudaGenerator.cuda_generate_structure3_batch = NULL;
+  gDim5CudaGenerator.cuda_destroy = NULL;
+  gDim5CudaGenerator.use_cuda = 0;
+}
+
+static void Dim5CudaGeneratorFinalize(void) {
+  Dim5CudaGeneratorDisable();
+}
+
+static int Dim5CudaGeneratorModeIsDisabled(const char *value) {
+  return (strcmp(value, "0") == 0) || (strcmp(value, "off") == 0) ||
+         (strcmp(value, "false") == 0);
+}
+
+static void Dim5CudaGeneratorInit(void) {
+  const char *mode = getenv("PALP_DIM5_CUDA_GENERATOR");
+
+  if (gDim5CudaGenerator.initialized)
+    return;
+  gDim5CudaGenerator.initialized = 1;
+
+  if ((mode == NULL) || (*mode == '\0') ||
+      Dim5CudaGeneratorModeIsDisabled(mode))
+    return;
+
+  gDim5CudaGenerator.enabled = 1;
+  gDim5CudaGenerator.pair_batch_size =
+      (unsigned int)ParseDim5CudaEnv("PALP_DIM5_CUDA_PAIR_BATCH", 16384ull);
+  gDim5CudaGenerator.block_size =
+      (unsigned int)ParseDim5CudaEnv("PALP_TYPE3_CUDA_BLOCK", 128ull);
+  gDim5CudaGenerator.verbose =
+      ParseDim5CudaEnv("PALP_TYPE3_FRONTIER_VERBOSE", 0ull) != 0ull ||
+      ParseDim5CudaEnv("PALP_DIM5_CUDA_VERBOSE", 0ull) != 0ull;
+
+  if (gDim5CudaGenerator.pair_batch_size == 0)
+    gDim5CudaGenerator.pair_batch_size = 16384;
+  if (gDim5CudaGenerator.block_size == 0)
+    gDim5CudaGenerator.block_size = 128;
+
+  if (!gDim5CudaGenerator.finalizer_registered) {
+    atexit(Dim5CudaGeneratorFinalize);
+    gDim5CudaGenerator.finalizer_registered = 1;
+  }
+
+#ifdef __linux__
+  {
+    const char *runtime_path = getenv("PALP_TYPE3_CUDA_RUNTIME");
+    char error_buffer[256] = {0};
+
+    if ((runtime_path == NULL) || (*runtime_path == '\0')) {
+      if (gDim5CudaGenerator.verbose)
+        fprintf(stderr,
+                "# dim5 cuda generator: PALP_TYPE3_CUDA_RUNTIME not set, falling back to cpu\n");
+    } else if ((gDim5CudaGenerator.library_handle =
+                    dlopen(runtime_path, RTLD_NOW | RTLD_LOCAL)) == NULL) {
+      if (gDim5CudaGenerator.verbose)
+        fprintf(stderr,
+                "# dim5 cuda generator: unable to load %s (%s), falling back to cpu\n",
+                runtime_path, dlerror());
+    } else {
+      gDim5CudaGenerator.cuda_create =
+          (Dim5CudaCreateFn)dlsym(gDim5CudaGenerator.library_handle,
+                                  "Type3BoundsCudaCreate");
+      gDim5CudaGenerator.cuda_upload_weight_pool =
+          (Dim5CudaUploadWeightPoolFn)dlsym(
+              gDim5CudaGenerator.library_handle,
+              "Type3BoundsCudaUploadDim5WeightPool");
+      gDim5CudaGenerator.cuda_generate_structure3_batch =
+          (Dim5CudaGenerateStructure3BatchFn)dlsym(
+              gDim5CudaGenerator.library_handle,
+              "Type3BoundsCudaGenerateDim5Structure3Batch");
+      gDim5CudaGenerator.cuda_destroy =
+          (Dim5CudaDestroyFn)dlsym(gDim5CudaGenerator.library_handle,
+                                   "Type3BoundsCudaDestroy");
+      if ((gDim5CudaGenerator.cuda_create == NULL) ||
+          (gDim5CudaGenerator.cuda_upload_weight_pool == NULL) ||
+          (gDim5CudaGenerator.cuda_generate_structure3_batch == NULL) ||
+          (gDim5CudaGenerator.cuda_destroy == NULL)) {
+        if (gDim5CudaGenerator.verbose)
+          fprintf(stderr,
+                  "# dim5 cuda generator: %s missing required CUDA entry points, falling back to cpu\n",
+                  runtime_path);
+        Dim5CudaGeneratorDisable();
+      } else if (gDim5CudaGenerator.cuda_create(
+                     &gDim5CudaGenerator.context,
+                     (uint32_t)(gDim5CudaGenerator.pair_batch_size *
+                                kType3BoundsRuntimeMaxStructure3PairOutputs),
+                     (uint32_t)gDim5CudaGenerator.block_size,
+                     error_buffer, sizeof(error_buffer)) == 0) {
+        gDim5CudaGenerator.use_cuda = 1;
+      } else {
+        if (gDim5CudaGenerator.verbose)
+          fprintf(stderr,
+                  "# dim5 cuda generator: CUDA initialization failed (%s), falling back to cpu\n",
+                  error_buffer[0] ? error_buffer : "unknown error");
+        Dim5CudaGeneratorDisable();
+      }
+    }
+  }
+#else
+  if (gDim5CudaGenerator.verbose)
+    fprintf(stderr,
+            "# dim5 cuda generator: CUDA mode requested on a non-Linux build, falling back to cpu\n");
+#endif
+
+  if (gDim5CudaGenerator.verbose)
+    fprintf(stderr,
+            "# dim5 cuda generator: mode=%s pair-batch=%u block=%u\n",
+            gDim5CudaGenerator.use_cuda ? "cuda" : "cpu",
+            gDim5CudaGenerator.pair_batch_size,
+            gDim5CudaGenerator.block_size);
+}
+
+static int Dim5CudaGeneratorEnabled(void) {
+  Dim5CudaGeneratorInit();
+  return gDim5CudaGenerator.enabled && gDim5CudaGenerator.use_cuda;
+}
+
 static void ResetCombinedCWSTimingMode(void) {
   CombinedCWSTimingState empty = {0};
 
@@ -3818,6 +4008,156 @@ void MakeDim5DescriptorCWS(const Dim5StructureDescriptor *descriptor,
   EnumerateDim5Weights(&context, 0);
 }
 
+static int Dim5Structure3CudaSupported(const Dim5StructureDescriptor *descriptor,
+                                       const Dim5WeightPool *AUXPOOL[]) {
+  return (descriptor != NULL) && (descriptor->id == 3) &&
+         (descriptor->simplex_count == 2) &&
+         (descriptor->simplex_sizes[0] == 5) &&
+         (descriptor->simplex_sizes[1] == 5) &&
+         (descriptor->shared_counts[0] == 3) &&
+         (descriptor->shared_counts[1] == 3) &&
+         (AUXPOOL[0] != NULL) && (AUXPOOL[0] == AUXPOOL[1]);
+}
+
+static void PopulateCudaWeightEntryFromDim5Weight(
+    const Dim5WeightEntry *source, Type3BoundsCudaWeightEntry *target) {
+  int i;
+
+  memset(target, 0, sizeof(*target));
+  target->d = (int64_t)source->d;
+  target->count = (uint32_t)source->N;
+  for (i = 0; i < source->N && i < kType3BoundsRuntimeMaxSimplexWeights; i++)
+    target->w[i] = (int64_t)source->w[i];
+}
+
+static void PopulateCWSFromDim5Structure3Candidate(
+    const Type3BoundsCudaDim5Structure3Candidate *source, CWS *target) {
+  int i;
+
+  memset(target, 0, sizeof(*target));
+  target->nw = 2;
+  target->N = 7;
+  target->nz = 0;
+  target->index = 1;
+  target->d[0] = (Long)source->left_d;
+  target->d[1] = (Long)source->right_d;
+
+  for (i = 0; i < 5; i++)
+    target->W[0][i] = (Long)source->left_w[i];
+  for (i = 0; i < 3; i++)
+    target->W[1][i] = (Long)source->right_w[i];
+  target->W[1][5] = (Long)source->right_w[3];
+  target->W[1][6] = (Long)source->right_w[4];
+}
+
+static int GenerateDim5Structure3OnCuda(const Dim5WeightPool *pool) {
+  Type3BoundsCudaWeightEntry *weights = NULL;
+  Type3BoundsCudaDim5Structure3Candidate *generated = NULL;
+  uint32_t *candidate_counts = NULL;
+  unsigned int pair_batch_size;
+  char error_buffer[256] = {0};
+  int emitted_any = 0;
+  long index;
+
+  if (!gCombinedCWSIPOnly || !Dim5CudaGeneratorEnabled() ||
+      (pool == NULL) || (pool->count <= 0))
+    return 0;
+
+  weights = (Type3BoundsCudaWeightEntry *)malloc(
+      (size_t)pool->count * sizeof(Type3BoundsCudaWeightEntry));
+  if (weights == NULL)
+    Die("Unable to allocate dim-5 CUDA weight upload buffer");
+  for (index = 0; index < pool->count; index++)
+    PopulateCudaWeightEntryFromDim5Weight(&pool->items[index], &weights[index]);
+
+  if (gDim5CudaGenerator.cuda_upload_weight_pool(
+          gDim5CudaGenerator.context, weights, (uint32_t)pool->count,
+          error_buffer, sizeof(error_buffer)) != 0) {
+    if (gDim5CudaGenerator.verbose)
+      fprintf(stderr,
+              "# dim5 cuda generator: weight-pool upload failed (%s), falling back to cpu\n",
+              error_buffer[0] ? error_buffer : "unknown error");
+    Dim5CudaGeneratorDisable();
+    free(weights);
+    return 0;
+  }
+  free(weights);
+
+  pair_batch_size = gDim5CudaGenerator.pair_batch_size;
+  generated = (Type3BoundsCudaDim5Structure3Candidate *)malloc(
+      (size_t)pair_batch_size *
+      kType3BoundsRuntimeMaxStructure3PairOutputs * sizeof(*generated));
+  candidate_counts = (uint32_t *)malloc((size_t)pair_batch_size *
+                                        sizeof(*candidate_counts));
+  if ((generated == NULL) || (candidate_counts == NULL))
+    Die("Unable to allocate dim-5 CUDA generation batch buffers");
+
+  for (index = 0; index < pool->count; index++) {
+    uint64_t row_start;
+    uint32_t row_pair_offset = 0;
+    uint32_t row_pair_count;
+
+    if (!Dim5IndexBelongsToShard(index + 1, gDim5RuntimeOptions.shard_count,
+                                 gDim5RuntimeOptions.shard_index))
+      continue;
+
+    row_start = ((uint64_t)index *
+           ((2ULL * (uint64_t)pool->count) - (uint64_t)index + 1ULL)) /
+          2ULL;
+    row_pair_count = (uint32_t)(pool->count - index);
+
+    while (row_pair_offset < row_pair_count) {
+      uint32_t current_pair_count = row_pair_count - row_pair_offset;
+      uint64_t pair_start = row_start + row_pair_offset;
+      uint32_t pair_index;
+
+      if (current_pair_count > pair_batch_size)
+        current_pair_count = pair_batch_size;
+
+      if (gDim5CudaGenerator.cuda_generate_structure3_batch(
+              gDim5CudaGenerator.context, pair_start, current_pair_count,
+              generated, candidate_counts, error_buffer,
+              sizeof(error_buffer)) != 0) {
+        free(candidate_counts);
+        free(generated);
+        if (!emitted_any) {
+          if (gDim5CudaGenerator.verbose)
+            fprintf(stderr,
+                    "# dim5 cuda generator: structure-3 generation failed (%s), falling back to cpu\n",
+                    error_buffer[0] ? error_buffer : "unknown error");
+          Dim5CudaGeneratorDisable();
+          return 0;
+        }
+        Die(error_buffer[0] ? error_buffer :
+                "dim-5 CUDA structure-3 generation failed");
+      }
+
+      for (pair_index = 0; pair_index < current_pair_count; pair_index++) {
+        uint32_t output_index;
+
+        for (output_index = 0; output_index < candidate_counts[pair_index];
+             output_index++) {
+          CWS candidate;
+
+          PopulateCWSFromDim5Structure3Candidate(
+              &generated[pair_index *
+                             kType3BoundsRuntimeMaxStructure3PairOutputs +
+                         output_index],
+              &candidate);
+          PRINT_CWS(&candidate);
+          emitted_any = 1;
+        }
+      }
+
+      row_pair_offset += current_pair_count;
+    }
+  }
+
+  free(candidate_counts);
+  free(generated);
+  return 1;
+}
+
 void Make_5_CWS(int structure_id) {
   Dim5WeightPool base_pools[DIM5_MAX_SIMPLEX_SIZE + 1];
   Dim5WeightPool selection_cache[DIM5_MAX_SIMPLEX_SIZE + 1]
@@ -3876,6 +4216,10 @@ void Make_5_CWS(int structure_id) {
       family_groups[j] = Dim5CombineFamilyGroup(descriptor->simplex_sizes[j],
                                                 orbit_groups[j]);
     }
+
+    if (Dim5Structure3CudaSupported(descriptor, AUXPOOL) &&
+        GenerateDim5Structure3OnCuda(AUXPOOL[0]))
+      continue;
 
     MakeDim5DescriptorCWS(descriptor, AUXPOOL, family_groups);
   }
@@ -4098,7 +4442,9 @@ void Make_IP_CWS(int narg, char *fn[]) {
                                                 orbit_groups[i]);
     }
 
-    MakeDim5DescriptorCWS(descriptor, AUXPOOL, family_groups);
+    if (!Dim5Structure3CudaSupported(descriptor, AUXPOOL) ||
+        !GenerateDim5Structure3OnCuda(AUXPOOL[0]))
+      MakeDim5DescriptorCWS(descriptor, AUXPOOL, family_groups);
 
     for (i = 0; i < nF; i++) {
       if (selection_owner[i] == i)
