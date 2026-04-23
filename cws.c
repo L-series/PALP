@@ -301,6 +301,9 @@ void IP_Poly_Data(int narg, char *fn[]);
 void Make_CWS_Points(CWS *, PolyPointList *);
 int Make_CWS_Points_Batchable(CWS *);
 void Make_CWS_Points_Batch(CWS *, PolyPointList **, int, double *);
+int Make_CWS_Points_IP_Check_Device_Batch(CWS *, int, int *, double *,
+                                          double *);
+void IP_Check_Batch(PolyPointList **, int, int *, double *);
 void Npoly2cws(int narg, char *fn[]);
 void RgcWeights(int narg, char *fn[]);
 void AddHalf(void);
@@ -2610,6 +2613,10 @@ static unsigned int ParseCombinedCWSBatchEnv(const char *name,
   const char *value = getenv(name);
   char *end = NULL;
   unsigned long parsed;
+  unsigned long max_value = 64;
+
+  if (getenv("PALP_TYPE3_DEVICE_ONLY") != NULL)
+    max_value = 1024;
 
   if ((value == NULL) || (*value == '\0'))
     return default_value;
@@ -2618,8 +2625,8 @@ static unsigned int ParseCombinedCWSBatchEnv(const char *name,
     return default_value;
   if (parsed == 0)
     return 1;
-  if (parsed > 8)
-    return 8;
+  if (parsed > max_value)
+    return (unsigned int)max_value;
   return (unsigned int)parsed;
 }
 
@@ -2635,7 +2642,9 @@ static void EnsureCWSPrintBatchInitialized(void) {
 
   gCWSPrintBatch.initialized = 1;
   gCWSPrintBatch.capacity =
-      ParseCombinedCWSBatchEnv("PALP_TYPE3_CUDA_CANDIDATE_BATCH", 1);
+      ParseCombinedCWSBatchEnv(
+          "PALP_TYPE3_CUDA_CANDIDATE_BATCH",
+          (getenv("PALP_TYPE3_DEVICE_ONLY") != NULL) ? 128 : 1);
   if (gCWSPrintBatch.capacity < 2)
     return;
 
@@ -2655,16 +2664,6 @@ static void EnsureCWSPrintBatchInitialized(void) {
   }
 }
 
-static PolyPointList *EnsureCWSPrintBatchPointBuffer(unsigned int index) {
-  if (gCWSPrintBatch.points[index] == NULL) {
-    gCWSPrintBatch.points[index] =
-        (PolyPointList *)malloc(sizeof(PolyPointList));
-    if (gCWSPrintBatch.points[index] == NULL)
-      Die("Unable to allocate combined-CWS batch point buffer");
-  }
-  return gCWSPrintBatch.points[index];
-}
-
 static int CWSPrintBatchCanQueue(CWS *CW) {
   EnsureCWSPrintBatchInitialized();
   if (!gCombinedCWSIPOnly)
@@ -2675,40 +2674,45 @@ static int CWSPrintBatchCanQueue(CWS *CW) {
 }
 
 static void FlushCWSPrintBatch(void) {
+  int *ip_results = NULL;
+  double *ip_seconds = NULL;
   unsigned int index;
 
   if (gCWSPrintBatch.count == 0)
     return;
 
-  for (index = 0; index < gCWSPrintBatch.count; index++)
-    EnsureCWSPrintBatchPointBuffer(index);
+  ip_results = (int *)calloc(gCWSPrintBatch.count, sizeof(int));
+  ip_seconds = (double *)calloc(gCWSPrintBatch.count, sizeof(double));
+  if ((ip_results == NULL) || (ip_seconds == NULL))
+    Die("Unable to allocate combined-CWS IP batch state");
 
-  Make_CWS_Points_Batch(gCWSPrintBatch.candidates, gCWSPrintBatch.points,
-                        (int)gCWSPrintBatch.count,
-                        gCWSPrintBatch.make_seconds);
+  if (!Make_CWS_Points_IP_Check_Device_Batch(
+          gCWSPrintBatch.candidates, (int)gCWSPrintBatch.count, ip_results,
+          gCWSPrintBatch.make_seconds, ip_seconds)) {
+    Make_CWS_Points_Batch(gCWSPrintBatch.candidates, gCWSPrintBatch.points,
+                          (int)gCWSPrintBatch.count,
+                          gCWSPrintBatch.make_seconds);
+
+    IP_Check_Batch(gCWSPrintBatch.points, (int)gCWSPrintBatch.count,
+                   ip_results, ip_seconds);
+  }
 
   for (index = 0; index < gCWSPrintBatch.count; index++) {
-    EqList E;
-    VertexNumList V;
-    int ip_is_ok;
-    double stage_start = 0.0;
-    int timing_enabled = CombinedCWSTimingEnabled();
-
     CombinedCWSTimingBeginCandidate();
     CombinedCWSTimingRecordMakeCWSPoints(gCWSPrintBatch.make_seconds[index]);
-    if (timing_enabled)
-      stage_start = CombinedCWSTimingNowSeconds();
-    ip_is_ok = IP_Check(gCWSPrintBatch.points[index], &V, &E);
-    if (timing_enabled)
-      CombinedCWSTimingRecordIPCheck(CombinedCWSTimingNowSeconds() - stage_start);
-    if (ip_is_ok) {
+    CombinedCWSTimingRecordIPCheck(ip_seconds[index]);
+    if (ip_results[index]) {
       Print_CWS(&gCWSPrintBatch.candidates[index]);
       fprintf(outFILE, "\n");
       CombinedCWSTimingFinalizeCandidate(1);
     } else
       CombinedCWSTimingFinalizeCandidate(0);
+    free(gCWSPrintBatch.points[index]);
+    gCWSPrintBatch.points[index] = NULL;
   }
 
+  free(ip_seconds);
+  free(ip_results);
   gCWSPrintBatch.count = 0;
 }
 

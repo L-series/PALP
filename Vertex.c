@@ -2,6 +2,11 @@
 
 #include "Global.h"
 #include "Rat.h"
+#include "../src/verify/type3_bounds_runtime.h"
+
+#ifdef __linux__
+#include <dlfcn.h>
+#endif
 
 int CombinedCWSTimingEnabled(void) __attribute__((weak));
 void CombinedCWSTimingAddCompletePolySeconds(double seconds)
@@ -28,10 +33,568 @@ typedef struct {
   Equation e[CEQ_Nmax];
 } CEqList;
 
+int Finish_IP_Check(PolyPointList *_P, VertexNumList *_V, EqList *_F,
+                    CEqList *_CEq, INCI *F_I, INCI *CEq_I);
+
+typedef int (*VertexType3CudaCreateFn)(Type3BoundsCudaContext **context,
+                                       uint32_t capacity,
+                                       uint32_t block_size,
+                                       char *error_buffer,
+                                       size_t error_buffer_size);
+typedef int (*VertexType3CudaClassifyEquationBatchFn)(
+    Type3BoundsCudaContext *context,
+    const Type3BoundsCudaEquation *equations,
+    uint32_t equation_count,
+    const int64_t *points,
+    uint32_t point_count,
+    uint32_t point_dimension,
+  uint32_t point_stride,
+    uint8_t *has_negative,
+    char *error_buffer,
+    size_t error_buffer_size);
+typedef int (*VertexType3CudaClassifyEquationTaskBatchFn)(
+  Type3BoundsCudaContext *context,
+  const Type3BoundsCudaEquation *equations,
+  const Type3BoundsCudaEquationTask *tasks,
+  uint32_t equation_count,
+  const int64_t *points,
+  uint32_t point_count,
+  uint32_t point_stride,
+  uint8_t *has_negative,
+  char *error_buffer,
+  size_t error_buffer_size);
+typedef int (*VertexType3CudaRunIPCheckBatchFn)(
+  Type3BoundsCudaContext *context,
+  const Type3BoundsCudaIPState *states,
+  uint32_t state_count,
+  const Type3BoundsCudaPointBuffer *point_buffers,
+  uint32_t point_stride,
+  int *results,
+  char *error_buffer,
+  size_t error_buffer_size);
+typedef void (*VertexType3CudaDestroyFn)(Type3BoundsCudaContext *context);
+
+typedef struct {
+  int initialized;
+  int enabled;
+  int verbose;
+  int finalizer_registered;
+#ifdef __linux__
+  void *library_handle;
+#endif
+  Type3BoundsCudaContext *context;
+  VertexType3CudaCreateFn cuda_create;
+  VertexType3CudaClassifyEquationBatchFn cuda_classify_equations;
+  VertexType3CudaClassifyEquationTaskBatchFn cuda_classify_equation_tasks;
+  VertexType3CudaRunIPCheckBatchFn cuda_run_ip_check_batch;
+  VertexType3CudaDestroyFn cuda_destroy;
+} VertexType3CudaConfig;
+
+typedef struct {
+  PolyPointList *points;
+  VertexNumList vertices;
+  EqList facets;
+  CEqList ceq;
+  INCI *ceq_i;
+  INCI *f_i;
+  uint32_t point_offset;
+  int result;
+  int active;
+} VertexIPCheckBatchState;
+
+typedef struct {
+  const CEqList *ceq;
+  const PolyPointList *points;
+  uint32_t point_offset;
+  uint32_t output_offset;
+  int state_index;
+} VertexCudaEquationTaskInput;
+
+static int VertexTryCudaRunIPCheckStates(VertexIPCheckBatchState *states,
+                                         int candidate_count, int *results,
+                                         double *seconds);
+
+static VertexType3CudaConfig gVertexType3Cuda;
+
+static int VertexType3CudaModeIsDisabled(const char *value) {
+  return (strcmp(value, "0") == 0) || (strcmp(value, "off") == 0) ||
+         (strcmp(value, "false") == 0);
+}
+
+static int VertexType3CudaVerboseRequested(void) {
+  const char *value = getenv("PALP_TYPE3_IP_CHECK_CUDA_VERBOSE");
+
+  if ((value != NULL) && (*value != '\0'))
+    return !VertexType3CudaModeIsDisabled(value);
+
+  value = getenv("PALP_TYPE3_FRONTIER_VERBOSE");
+  return ((value != NULL) && (*value != '\0') &&
+          !VertexType3CudaModeIsDisabled(value));
+}
+
+static unsigned int VertexParseUnsignedEnv(const char *name,
+                                           unsigned int default_value) {
+  const char *value = getenv(name);
+  char *end = NULL;
+  unsigned long parsed;
+
+  if ((value == NULL) || (*value == '\0'))
+    return default_value;
+  parsed = strtoul(value, &end, 10);
+  if ((end == value) || (*end != '\0') || (parsed == 0))
+    return default_value;
+  if (parsed > 1024)
+    parsed = 1024;
+  return (unsigned int)parsed;
+}
+
+static int VertexType3CudaSingleRequested(void) {
+  const char *value = getenv("PALP_TYPE3_IP_CHECK_CUDA");
+
+  if ((value != NULL) && (*value != '\0'))
+    return !VertexType3CudaModeIsDisabled(value);
+
+  return 0;
+}
+
+static int VertexType3CudaBatchRequested(void) {
+  const char *value = getenv("PALP_TYPE3_IP_CHECK_CUDA");
+
+  if ((value != NULL) && (*value != '\0'))
+    return !VertexType3CudaModeIsDisabled(value);
+
+  value = getenv("PALP_TYPE3_FRONTIER");
+  return ((value != NULL) && (strcmp(value, "cuda") == 0));
+}
+
+static int VertexType3CudaFullRequested(void) {
+  const char *value = getenv("PALP_TYPE3_IP_CHECK_CUDA");
+
+  if ((value != NULL) && (strcmp(value, "full") == 0))
+    return 1;
+  value = getenv("PALP_TYPE3_IP_CHECK_CUDA_FULL");
+  return ((value != NULL) && (*value != '\0') &&
+          !VertexType3CudaModeIsDisabled(value));
+}
+
+static void VertexType3CudaDisable(void) {
+  if ((gVertexType3Cuda.context != NULL) &&
+      (gVertexType3Cuda.cuda_destroy != NULL))
+    gVertexType3Cuda.cuda_destroy(gVertexType3Cuda.context);
+  gVertexType3Cuda.context = NULL;
+#ifdef __linux__
+  if (gVertexType3Cuda.library_handle != NULL)
+    dlclose(gVertexType3Cuda.library_handle);
+  gVertexType3Cuda.library_handle = NULL;
+#endif
+  gVertexType3Cuda.cuda_create = NULL;
+  gVertexType3Cuda.cuda_classify_equations = NULL;
+  gVertexType3Cuda.cuda_classify_equation_tasks = NULL;
+  gVertexType3Cuda.cuda_run_ip_check_batch = NULL;
+  gVertexType3Cuda.cuda_destroy = NULL;
+  gVertexType3Cuda.enabled = 0;
+}
+
+static void VertexType3CudaFinalize(void) { VertexType3CudaDisable(); }
+
+static void VertexType3CudaInit(void) {
+  char error_buffer[256] = {0};
+
+  if (gVertexType3Cuda.initialized)
+    return;
+  gVertexType3Cuda.initialized = 1;
+  gVertexType3Cuda.verbose = VertexType3CudaVerboseRequested();
+
+  if (!gVertexType3Cuda.finalizer_registered) {
+    atexit(VertexType3CudaFinalize);
+    gVertexType3Cuda.finalizer_registered = 1;
+  }
+
+#ifndef __linux__
+  return;
+#else
+  {
+    const char *runtime_path = getenv("PALP_TYPE3_CUDA_RUNTIME");
+
+    if ((runtime_path == NULL) || (*runtime_path == '\0')) {
+      if (gVertexType3Cuda.verbose)
+        fprintf(stderr,
+                "# ip-check cuda: PALP_TYPE3_CUDA_RUNTIME not set, falling back to cpu\n");
+      return;
+    }
+
+    gVertexType3Cuda.library_handle = dlopen(runtime_path, RTLD_NOW | RTLD_LOCAL);
+    if (gVertexType3Cuda.library_handle == NULL) {
+      if (gVertexType3Cuda.verbose)
+        fprintf(stderr,
+                "# ip-check cuda: unable to load %s (%s), falling back to cpu\n",
+                runtime_path, dlerror());
+      return;
+    }
+
+    gVertexType3Cuda.cuda_create =
+        (VertexType3CudaCreateFn)dlsym(gVertexType3Cuda.library_handle,
+                                       "Type3BoundsCudaCreate");
+    gVertexType3Cuda.cuda_classify_equations =
+        (VertexType3CudaClassifyEquationBatchFn)dlsym(
+            gVertexType3Cuda.library_handle,
+            "Type3BoundsCudaClassifyEquationBatch");
+    gVertexType3Cuda.cuda_classify_equation_tasks =
+      (VertexType3CudaClassifyEquationTaskBatchFn)dlsym(
+        gVertexType3Cuda.library_handle,
+        "Type3BoundsCudaClassifyEquationTaskBatch");
+    gVertexType3Cuda.cuda_run_ip_check_batch =
+      (VertexType3CudaRunIPCheckBatchFn)dlsym(
+        gVertexType3Cuda.library_handle,
+        "Type3BoundsCudaRunIPCheckBatch");
+    gVertexType3Cuda.cuda_destroy =
+        (VertexType3CudaDestroyFn)dlsym(gVertexType3Cuda.library_handle,
+                                        "Type3BoundsCudaDestroy");
+    if ((gVertexType3Cuda.cuda_create == NULL) ||
+        (gVertexType3Cuda.cuda_classify_equations == NULL) ||
+        (gVertexType3Cuda.cuda_destroy == NULL)) {
+      if (gVertexType3Cuda.verbose)
+        fprintf(stderr,
+                "# ip-check cuda: %s missing required CUDA entry points, falling back to cpu\n",
+                runtime_path);
+      VertexType3CudaDisable();
+      return;
+    }
+
+    if (gVertexType3Cuda.cuda_create(&gVertexType3Cuda.context, 1, 128,
+                                     error_buffer,
+                                     sizeof(error_buffer)) != 0) {
+      if (gVertexType3Cuda.verbose)
+        fprintf(stderr,
+                "# ip-check cuda: initialization failed (%s), falling back to cpu\n",
+                error_buffer[0] ? error_buffer : "unknown error");
+      VertexType3CudaDisable();
+      return;
+    }
+  }
+
+  gVertexType3Cuda.enabled = 1;
+#endif
+}
+
+static int VertexTryCudaClassifyEquations(CEqList *_C, PolyPointList *_P,
+                                          uint8_t *has_negative) {
+  Type3BoundsCudaEquation *equations;
+  char error_buffer[256] = {0};
+  int equation_index, coord;
+
+  if ((_C == NULL) || (_P == NULL) || (has_negative == NULL) ||
+      (sizeof(Long) != sizeof(int64_t)) || (_P->n <= 0) || (_P->np < 0) ||
+      (_P->n > kType3BoundsRuntimeMaxDimension))
+    return 0;
+
+  if (!VertexType3CudaSingleRequested())
+    return 0;
+  VertexType3CudaInit();
+  if (!gVertexType3Cuda.enabled ||
+      (gVertexType3Cuda.cuda_classify_equations == NULL) ||
+      (gVertexType3Cuda.context == NULL))
+    return 0;
+  if (_C->ne <= 0)
+    return 1;
+
+  equations = (Type3BoundsCudaEquation *)malloc((size_t)_C->ne *
+                                                sizeof(Type3BoundsCudaEquation));
+  if (equations == NULL)
+    return 0;
+
+  for (equation_index = 0; equation_index < _C->ne; equation_index++) {
+    memset(&equations[equation_index], 0, sizeof(Type3BoundsCudaEquation));
+    for (coord = 0; coord < _P->n; coord++)
+      equations[equation_index].a[coord] =
+          (int64_t)_C->e[equation_index].a[coord];
+    equations[equation_index].c = (int64_t)_C->e[equation_index].c;
+  }
+
+  if (gVertexType3Cuda.cuda_classify_equations(
+          gVertexType3Cuda.context, equations, (uint32_t)_C->ne,
+      (const int64_t *)&_P->x[0][0], (uint32_t)_P->np, (uint32_t)_P->n,
+      (uint32_t)POLY_Dmax,
+          has_negative, error_buffer, sizeof(error_buffer)) != 0) {
+    if (gVertexType3Cuda.verbose)
+      fprintf(stderr,
+              "# ip-check cuda: classification failed (%s), falling back to cpu\n",
+              error_buffer[0] ? error_buffer : "unknown error");
+    free(equations);
+    VertexType3CudaDisable();
+    return 0;
+  }
+
+  free(equations);
+  return 1;
+}
+
+static uint8_t *VertexAllocateNegativeFlags(CEqList *_C, PolyPointList *_P) {
+  uint8_t *has_negative;
+
+  if ((_C == NULL) || (_C->ne <= 0))
+    return NULL;
+
+  has_negative = (uint8_t *)malloc((size_t)_C->ne * sizeof(uint8_t));
+  if (has_negative == NULL)
+    return NULL;
+  if (!VertexTryCudaClassifyEquations(_C, _P, has_negative)) {
+    free(has_negative);
+    return NULL;
+  }
+  return has_negative;
+}
+
+static void VertexSwapNegativeFlag(uint8_t *has_negative, int left, int right) {
+  uint8_t tmp;
+
+  if ((has_negative == NULL) || (left == right))
+    return;
+  tmp = has_negative[left];
+  has_negative[left] = has_negative[right];
+  has_negative[right] = tmp;
+}
+
+static int VertexTryCudaClassifyEquationTasks(
+    const VertexCudaEquationTaskInput *inputs, int input_count,
+  const int64_t *points, uint32_t point_count, int upload_points,
+  uint8_t *has_negative) {
+  Type3BoundsCudaEquation *equations;
+  Type3BoundsCudaEquationTask *tasks;
+  char error_buffer[256] = {0};
+  int input_index, equation_index;
+  uint32_t total_equation_count = 0;
+
+  if ((inputs == NULL) || (input_count <= 0) || (has_negative == NULL) ||
+      (sizeof(Long) != sizeof(int64_t)))
+    return 0;
+  if (upload_points && (points == NULL))
+    return 0;
+  if (!VertexType3CudaBatchRequested())
+    return 0;
+
+  for (input_index = 0; input_index < input_count; input_index++) {
+    if ((inputs[input_index].ceq == NULL) || (inputs[input_index].points == NULL))
+      return 0;
+    total_equation_count += (uint32_t)inputs[input_index].ceq->ne;
+  }
+  if (total_equation_count == 0)
+    return 1;
+
+  VertexType3CudaInit();
+  if (!gVertexType3Cuda.enabled ||
+      (gVertexType3Cuda.cuda_classify_equation_tasks == NULL) ||
+      (gVertexType3Cuda.context == NULL))
+    return 0;
+
+  equations = (Type3BoundsCudaEquation *)malloc(
+      (size_t)total_equation_count * sizeof(Type3BoundsCudaEquation));
+  tasks = (Type3BoundsCudaEquationTask *)malloc(
+      (size_t)total_equation_count * sizeof(Type3BoundsCudaEquationTask));
+  if ((equations == NULL) || (tasks == NULL)) {
+    free(equations);
+    free(tasks);
+    return 0;
+  }
+
+  equation_index = 0;
+  for (input_index = 0; input_index < input_count; input_index++) {
+    const CEqList *ceq = inputs[input_index].ceq;
+    const PolyPointList *point_list = inputs[input_index].points;
+    int ceq_index, coord;
+
+    for (ceq_index = 0; ceq_index < ceq->ne; ceq_index++, equation_index++) {
+      memset(&equations[equation_index], 0, sizeof(Type3BoundsCudaEquation));
+      for (coord = 0; coord < point_list->n; coord++)
+        equations[equation_index].a[coord] =
+            (int64_t)ceq->e[ceq_index].a[coord];
+      equations[equation_index].c = (int64_t)ceq->e[ceq_index].c;
+      tasks[equation_index].point_offset = inputs[input_index].point_offset;
+      tasks[equation_index].point_count = (uint32_t)point_list->np;
+      tasks[equation_index].point_dimension = (uint32_t)point_list->n;
+    }
+  }
+
+  if (gVertexType3Cuda.cuda_classify_equation_tasks(
+          gVertexType3Cuda.context, equations, tasks, total_equation_count,
+      upload_points ? points : NULL, upload_points ? point_count : 0,
+      upload_points ? (uint32_t)kType3BoundsRuntimeMaxDimension : 0,
+          has_negative, error_buffer, sizeof(error_buffer)) != 0) {
+    if (gVertexType3Cuda.verbose)
+      fprintf(stderr,
+              "# ip-check cuda: batch classification failed (%s), falling back to cpu\n",
+              error_buffer[0] ? error_buffer : "unknown error");
+    free(equations);
+    free(tasks);
+    VertexType3CudaDisable();
+    return 0;
+  }
+
+  free(equations);
+  free(tasks);
+  return 1;
+}
+
 /*  ======================================================================  */
 /*  ==========		     			  		==========  */
 /*  ==========	   I N C I D E N C E S (as bit patterns)	==========  */
 /*  ==========							==========  */
+static void VertexCopyEquationToCuda(Type3BoundsCudaEquation *dst,
+                                     const Equation *src,
+                                     int point_dimension) {
+  int coord;
+
+  memset(dst, 0, sizeof(*dst));
+  for (coord = 0; coord < point_dimension; coord++)
+    dst->a[coord] = (int64_t)src->a[coord];
+  dst->c = (int64_t)src->c;
+}
+ 
+static int VertexPopulateCudaIPState(const VertexIPCheckBatchState *state,
+                                     uint32_t point_offset,
+                                     Type3BoundsCudaIPState *cuda_state) {
+  int index;
+
+  if ((state == NULL) || (state->points == NULL) || (cuda_state == NULL) ||
+      (state->points->n <= 0) ||
+      (state->points->n > kType3BoundsRuntimeMaxDimension) ||
+      (state->vertices.nv > (int)kType3BoundsRuntimeMaxIPVertices) ||
+      (state->facets.ne > (int)kType3BoundsRuntimeMaxIPEquations) ||
+      (state->ceq.ne > (int)kType3BoundsRuntimeMaxIPEquations))
+    return 0;
+
+  memset(cuda_state, 0, sizeof(*cuda_state));
+  cuda_state->point_offset = point_offset;
+  cuda_state->point_count = (uint32_t)state->points->np;
+  cuda_state->point_dimension = (uint32_t)state->points->n;
+  cuda_state->vertex_count = (uint32_t)state->vertices.nv;
+  cuda_state->facet_count = (uint32_t)state->facets.ne;
+  cuda_state->ceq_count = (uint32_t)state->ceq.ne;
+
+  for (index = 0; index < state->vertices.nv; index++)
+    cuda_state->vertices[index] = (uint32_t)state->vertices.v[index];
+  for (index = 0; index < state->facets.ne; index++) {
+    cuda_state->facet_incidences[index] = (uint64_t)state->f_i[index];
+    VertexCopyEquationToCuda(&cuda_state->facets[index],
+                             &state->facets.e[index], state->points->n);
+  }
+  for (index = 0; index < state->ceq.ne; index++) {
+    cuda_state->ceq_incidences[index] = (uint64_t)state->ceq_i[index];
+    VertexCopyEquationToCuda(&cuda_state->ceqs[index], &state->ceq.e[index],
+                             state->points->n);
+  }
+  return 1;
+}
+
+static int VertexTryCudaRunIPCheckStates(VertexIPCheckBatchState *states,
+                                         int candidate_count, int *results,
+                                         double *seconds) {
+  Type3BoundsCudaIPState *cuda_states = NULL;
+  Type3BoundsCudaPointBuffer *point_buffers = NULL;
+  int *cuda_results = NULL;
+  int *state_indices = NULL;
+  int active_count = 0;
+  uint32_t total_equation_count = 0;
+  uint32_t point_offset = 0;
+  int index;
+  char error_buffer[256] = {0};
+  double batch_start;
+  double batch_seconds;
+  double per_state_seconds;
+  unsigned int min_active =
+    VertexParseUnsignedEnv("PALP_TYPE3_IP_CHECK_CUDA_MIN_ACTIVE", 8);
+  unsigned int min_equations = VertexParseUnsignedEnv(
+    "PALP_TYPE3_IP_CHECK_CUDA_MIN_EQUATIONS", 64);
+
+  if ((states == NULL) || (results == NULL) || (candidate_count <= 0) ||
+      !VertexType3CudaFullRequested())
+    return 0;
+
+  VertexType3CudaInit();
+  if (!gVertexType3Cuda.enabled ||
+      (gVertexType3Cuda.cuda_run_ip_check_batch == NULL) ||
+      (gVertexType3Cuda.context == NULL))
+    return 0;
+
+  for (index = 0; index < candidate_count; index++)
+    if (states[index].active) {
+      active_count++;
+      total_equation_count += (uint32_t)states[index].ceq.ne;
+    }
+  if (active_count == 0)
+    return 1;
+  if (((unsigned int)active_count < min_active) ||
+      (total_equation_count < min_equations))
+    return 0;
+
+  cuda_states = (Type3BoundsCudaIPState *)calloc((size_t)active_count,
+                                                 sizeof(Type3BoundsCudaIPState));
+  point_buffers = (Type3BoundsCudaPointBuffer *)calloc(
+      (size_t)active_count, sizeof(Type3BoundsCudaPointBuffer));
+  cuda_results = (int *)calloc((size_t)active_count, sizeof(int));
+  state_indices = (int *)malloc((size_t)active_count * sizeof(int));
+  if ((cuda_states == NULL) || (point_buffers == NULL) ||
+      (cuda_results == NULL) || (state_indices == NULL))
+    goto fail;
+
+  active_count = 0;
+  for (index = 0; index < candidate_count; index++) {
+    if (!states[index].active)
+      continue;
+    state_indices[active_count] = index;
+    point_buffers[active_count].points =
+        (int64_t *)&states[index].points->x[0][0];
+    point_buffers[active_count].point_count =
+        (uint32_t)states[index].points->np;
+    if (!VertexPopulateCudaIPState(&states[index], point_offset,
+                                   &cuda_states[active_count]))
+      goto fail;
+    point_offset += point_buffers[active_count].point_count;
+    active_count++;
+  }
+
+  batch_start = CompletePolyTimingNowSeconds();
+  if (gVertexType3Cuda.cuda_run_ip_check_batch(
+          gVertexType3Cuda.context, cuda_states, (uint32_t)active_count,
+          point_buffers, (uint32_t)POLY_Dmax, cuda_results, error_buffer,
+          sizeof(error_buffer)) != 0) {
+    if (gVertexType3Cuda.verbose)
+      fprintf(stderr,
+              "# ip-check cuda: full batch run failed (%s), falling back to hybrid path\n",
+              error_buffer[0] ? error_buffer : "unknown error");
+    goto fail;
+  }
+  batch_seconds = CompletePolyTimingNowSeconds() - batch_start;
+  per_state_seconds = batch_seconds / (double)active_count;
+
+  for (index = 0; index < active_count; index++) {
+    int state_index = state_indices[index];
+
+    results[state_index] = cuda_results[index];
+    if (seconds != NULL)
+      seconds[state_index] += per_state_seconds;
+    states[state_index].active = 0;
+  }
+
+  free(state_indices);
+  free(cuda_results);
+  free(point_buffers);
+  free(cuda_states);
+  return 1;
+
+fail:
+  free(state_indices);
+  free(cuda_results);
+  free(point_buffers);
+  free(cuda_states);
+  return 0;
+}
+
+/*  ======================================================================  */
+/*  ==========		     			==========  */
+/*  ==========	   I N C I D E N C E S (as bit patterns)	==========  */
+/*  ==========							==========  */
+/*  ======================================================================  */
 /*  ======================================================================  */
 
 #if (VERT_Nmax > LONG_LONG_Nbits)
@@ -967,25 +1530,327 @@ void Make_New_CEqs(PolyPointList *_P, VertexNumList *_V, CEqList *_C,
 
 #if MAX_BAD_EQ
 
+static int IP_Search_Classified_Bad_Eq(CEqList *_C, EqList *_F, INCI *CEq_I,
+                                       INCI *F_I, uint8_t *has_negative,
+                                       int *_IP) {
+  while (_C->ne--) {
+    int j, M = _C->ne;
+
+    for (j = 0; j < _C->ne; j++)
+      if (INCI_lex_GT(&CEq_I[j], &CEq_I[M]))
+        M = j;
+    if (has_negative[M]) {
+      INCI AI = CEq_I[M];
+      Equation AE = _C->e[M];
+
+      CEq_I[M] = CEq_I[_C->ne];
+      _C->e[M] = _C->e[_C->ne];
+      CEq_I[_C->ne] = AI;
+      _C->e[_C->ne] = AE;
+      VertexSwapNegativeFlag(has_negative, M, _C->ne);
+      return ++_C->ne;
+    }
+    if (_C->e[M].c < 1) {
+      *_IP = 0;
+      return 1;
+    }
+    assert(_F->ne < EQUA_Nmax);
+    _F->e[_F->ne] = _C->e[M];
+    F_I[_F->ne++] = CEq_I[M];
+    if (M < _C->ne) {
+      _C->e[M] = _C->e[_C->ne];
+      CEq_I[M] = CEq_I[_C->ne];
+      VertexSwapNegativeFlag(has_negative, M, _C->ne);
+    }
+  }
+  return 0;
+}
+
+static int AdvanceIPCheckWithClassified(PolyPointList *_P, VertexNumList *_V,
+                                        EqList *_F, CEqList *_CEq, INCI *F_I,
+                                        INCI *CEq_I, uint8_t *has_negative,
+                                        int *result) {
+  int IP = 1;
+
+  while (0 <= _CEq->ne)
+    if (IP_Search_Classified_Bad_Eq(_CEq, _F, CEq_I, F_I, has_negative,
+                                    &IP)) {
+      if (!IP) {
+        *result = 0;
+        return 0;
+      }
+      assert(_V->nv < VERT_Nmax);
+      _V->v[_V->nv++] = Search_New_Vertex(&(_CEq->e[_CEq->ne - 1]), _P);
+      Make_New_CEqs(_P, _V, _CEq, _F, CEq_I, F_I);
+      return 1;
+    }
+
+  *result = 1;
+  return 0;
+}
+
+void IP_Check_Batch(PolyPointList **points, int candidate_count, int *results,
+                    double *seconds) {
+  VertexIPCheckBatchState *states = NULL;
+  VertexCudaEquationTaskInput *inputs = NULL;
+  INCI *ceq_i_storage = NULL;
+  INCI *f_i_storage = NULL;
+  uint32_t *point_offsets = NULL;
+  int64_t *packed_points = NULL;
+  uint8_t *has_negative = NULL;
+  uint32_t packed_point_count = 0;
+  int index;
+  int active_count = 0;
+  int upload_points = 1;
+    unsigned int min_active =
+      VertexParseUnsignedEnv("PALP_TYPE3_IP_CHECK_CUDA_MIN_ACTIVE", 8);
+    unsigned int min_equations = VertexParseUnsignedEnv(
+      "PALP_TYPE3_IP_CHECK_CUDA_MIN_EQUATIONS", 64);
+
+  if ((points == NULL) || (results == NULL) || (candidate_count <= 0))
+    return;
+
+  if (seconds != NULL)
+    memset(seconds, 0, (size_t)candidate_count * sizeof(double));
+  memset(results, 0, (size_t)candidate_count * sizeof(int));
+
+  if (!VertexType3CudaBatchRequested())
+    goto cpu_fallback;
+
+  states = (VertexIPCheckBatchState *)calloc((size_t)candidate_count,
+                                             sizeof(VertexIPCheckBatchState));
+  ceq_i_storage = (INCI *)malloc((size_t)candidate_count * CEQ_Nmax *
+                                 sizeof(INCI));
+  f_i_storage = (INCI *)malloc((size_t)candidate_count * EQUA_Nmax *
+                               sizeof(INCI));
+  if ((states == NULL) || (ceq_i_storage == NULL) || (f_i_storage == NULL))
+    goto cpu_fallback;
+
+  for (index = 0; index < candidate_count; index++) {
+    VertexIPCheckBatchState *state = &states[index];
+    int ceq_index;
+
+    state->points = points[index];
+    state->ceq_i = ceq_i_storage + (size_t)index * CEQ_Nmax;
+    state->f_i = f_i_storage + (size_t)index * EQUA_Nmax;
+    if (state->points == NULL)
+      continue;
+
+    if (GLZ_Start_Simplex(state->points, &state->vertices, &state->ceq)) {
+      results[index] = 0;
+      continue;
+    }
+    for (ceq_index = 0; ceq_index < state->ceq.ne; ceq_index++)
+      if (INCI_abs(state->ceq_i[ceq_index] =
+                       Eq_To_INCI(&(state->ceq.e[ceq_index]), state->points,
+                                  &state->vertices)) < state->points->n) {
+        fprintf(outFILE, "Bad CEq in IP_Check_Batch");
+        exit(0);
+      }
+    state->facets.ne = 0;
+    state->active = 1;
+    active_count++;
+  }
+
+  if ((active_count != 0) &&
+      VertexTryCudaRunIPCheckStates(states, candidate_count, results, seconds)) {
+    free(f_i_storage);
+    free(ceq_i_storage);
+    free(states);
+    return;
+  }
+
+  inputs = (VertexCudaEquationTaskInput *)calloc((size_t)candidate_count,
+                                                 sizeof(VertexCudaEquationTaskInput));
+  point_offsets = (uint32_t *)malloc((size_t)candidate_count * sizeof(uint32_t));
+  if ((inputs == NULL) || (point_offsets == NULL))
+    goto cpu_fallback;
+
+  for (index = 0; index < candidate_count; index++) {
+    point_offsets[index] = packed_point_count;
+    states[index].point_offset = packed_point_count;
+    if (points[index] != NULL)
+      packed_point_count += (uint32_t)points[index]->np;
+  }
+
+  if (packed_point_count != 0) {
+    size_t point_value_count =
+        (size_t)packed_point_count * kType3BoundsRuntimeMaxDimension;
+
+    packed_points = (int64_t *)malloc(point_value_count * sizeof(int64_t));
+    if (packed_points == NULL)
+      goto cpu_fallback;
+    memset(packed_points, 0, point_value_count * sizeof(int64_t));
+  }
+
+  for (index = 0; index < candidate_count; index++) {
+    VertexIPCheckBatchState *state = &states[index];
+
+    if ((state->points == NULL) || (packed_points == NULL))
+      continue;
+    {
+      size_t base = (size_t)state->point_offset *
+                    kType3BoundsRuntimeMaxDimension;
+      size_t point_bytes = (size_t)state->points->np *
+                           sizeof(state->points->x[0]);
+
+      memcpy(packed_points + base, &state->points->x[0][0], point_bytes);
+    }
+  }
+
+  if (active_count != 0) {
+    has_negative =
+        (uint8_t *)malloc((size_t)candidate_count * CEQ_Nmax * sizeof(uint8_t));
+    if (has_negative == NULL)
+      goto cpu_fallback;
+  }
+
+  while (active_count > 0) {
+    uint32_t total_equation_count = 0;
+    int input_count = 0;
+    double batch_start;
+    double batch_seconds;
+    double per_state_seconds;
+
+    for (index = 0; index < candidate_count; index++) {
+      if (!states[index].active)
+        continue;
+      if (states[index].ceq.ne == 0) {
+        states[index].result = 1;
+        results[index] = 1;
+        states[index].active = 0;
+        active_count--;
+        continue;
+      }
+      inputs[input_count].ceq = &states[index].ceq;
+      inputs[input_count].points = states[index].points;
+      inputs[input_count].point_offset = states[index].point_offset;
+      inputs[input_count].output_offset = total_equation_count;
+      inputs[input_count].state_index = index;
+      total_equation_count += (uint32_t)states[index].ceq.ne;
+      input_count++;
+    }
+
+    if (((unsigned int)input_count < min_active) ||
+      (total_equation_count < min_equations)) {
+      for (index = 0; index < input_count; index++) {
+        int state_index = inputs[index].state_index;
+        double step_start = CompletePolyTimingNowSeconds();
+
+        results[state_index] = Finish_IP_Check(
+            states[state_index].points, &states[state_index].vertices,
+            &states[state_index].facets, &states[state_index].ceq,
+            states[state_index].f_i, states[state_index].ceq_i);
+        if (seconds != NULL)
+          seconds[state_index] +=
+              CompletePolyTimingNowSeconds() - step_start;
+        states[state_index].active = 0;
+        active_count--;
+      }
+      continue;
+    }
+
+    if ((input_count == 0) || (total_equation_count == 0))
+      break;
+
+    batch_start = CompletePolyTimingNowSeconds();
+    if (!VertexTryCudaClassifyEquationTasks(inputs, input_count, packed_points,
+                                            packed_point_count, upload_points,
+                                            has_negative)) {
+      goto cpu_fallback;
+    }
+    upload_points = 0;
+    batch_seconds = CompletePolyTimingNowSeconds() - batch_start;
+    per_state_seconds = batch_seconds / (double)input_count;
+
+    for (index = 0; index < input_count; index++) {
+      int state_index = inputs[index].state_index;
+      double step_start = CompletePolyTimingNowSeconds();
+      int needs_reclassify;
+
+      if (seconds != NULL)
+        seconds[state_index] += per_state_seconds;
+      needs_reclassify = AdvanceIPCheckWithClassified(
+          states[state_index].points, &states[state_index].vertices,
+          &states[state_index].facets, &states[state_index].ceq,
+          states[state_index].f_i, states[state_index].ceq_i,
+          has_negative + inputs[index].output_offset,
+          &results[state_index]);
+      if (seconds != NULL)
+        seconds[state_index] +=
+            CompletePolyTimingNowSeconds() - step_start;
+      if (!needs_reclassify) {
+        states[state_index].active = 0;
+        active_count--;
+      }
+    }
+  }
+
+  free(has_negative);
+  free(packed_points);
+  free(point_offsets);
+  free(f_i_storage);
+  free(ceq_i_storage);
+  free(inputs);
+  free(states);
+  return;
+
+cpu_fallback:
+  free(has_negative);
+  free(packed_points);
+  free(point_offsets);
+  free(f_i_storage);
+  free(ceq_i_storage);
+  free(inputs);
+  free(states);
+
+  for (index = 0; index < candidate_count; index++) {
+    VertexNumList V;
+    EqList E;
+    double start_seconds = CompletePolyTimingNowSeconds();
+
+    results[index] =
+        (points[index] != NULL) ? IP_Check(points[index], &V, &E) : 0;
+    if (seconds != NULL)
+      seconds[index] += CompletePolyTimingNowSeconds() - start_seconds;
+  }
+}
+
 int IP_Search_Bad_Eq(CEqList *_C, EqList *_F, INCI *CEq_I, INCI *F_I,
                      PolyPointList *_P, int *_IP) { /* return 0 :: no bad eq. */
+  uint8_t *has_negative = VertexAllocateNegativeFlags(_C, _P);
+
   while (_C->ne--) {
     int j, M = _C->ne; /* INCI_LmR INCI_lex_GT */
     for (j = 0; j < _C->ne; j++)
       if (INCI_lex_GT(&CEq_I[j], &CEq_I[M]))
         M = j;
-    for (j = 0; j < _P->np; j++)
-      if (EVAL_EQ(&(_C->e[M]), _P->x[j], _P->n) < 0) {
-        INCI AI = CEq_I[M];
-        Equation AE = _C->e[M];
-        CEq_I[M] = CEq_I[_C->ne];
-        _C->e[M] = _C->e[_C->ne];
-        CEq_I[_C->ne] = AI;
-        _C->e[_C->ne] = AE;
-        return ++_C->ne;
-      }
+    if ((has_negative != NULL) && has_negative[M]) {
+      INCI AI = CEq_I[M];
+      Equation AE = _C->e[M];
+      CEq_I[M] = CEq_I[_C->ne];
+      _C->e[M] = _C->e[_C->ne];
+      CEq_I[_C->ne] = AI;
+      _C->e[_C->ne] = AE;
+      VertexSwapNegativeFlag(has_negative, M, _C->ne);
+      free(has_negative);
+      return ++_C->ne;
+    }
+    if (has_negative == NULL)
+      for (j = 0; j < _P->np; j++)
+        if (EVAL_EQ(&(_C->e[M]), _P->x[j], _P->n) < 0) {
+          INCI AI = CEq_I[M];
+          Equation AE = _C->e[M];
+          CEq_I[M] = CEq_I[_C->ne];
+          _C->e[M] = _C->e[_C->ne];
+          CEq_I[_C->ne] = AI;
+          _C->e[_C->ne] = AE;
+          free(has_negative);
+          return ++_C->ne;
+        }
     if (_C->e[M].c < 1) {
       *_IP = 0;
+      free(has_negative);
       return 1;
     }
     assert(_F->ne < EQUA_Nmax);
@@ -995,28 +1860,45 @@ int IP_Search_Bad_Eq(CEqList *_C, EqList *_F, INCI *CEq_I, INCI *F_I,
     if (M < _C->ne) {
       _C->e[M] = _C->e[_C->ne];
       CEq_I[M] = CEq_I[_C->ne];
+      VertexSwapNegativeFlag(has_negative, M, _C->ne);
     }
   }
+  free(has_negative);
   return 0;
 }
 
 int FE_Search_Bad_Eq(CEqList *_C, EqList *_F, INCI *CEq_I, INCI *F_I,
                      PolyPointList *_P, int *_IP) { /* return 0 :: no bad eq. */
+  uint8_t *has_negative = VertexAllocateNegativeFlags(_C, _P);
+
   while (_C->ne--) {
     int j, M = _C->ne; /* INCI_LmR INCI_lex_GT */
     for (j = 0; j < _C->ne; j++)
       if (INCI_lex_GT(&CEq_I[j], &CEq_I[M]))
         M = j;
-    for (j = 0; j < _P->np; j++)
-      if (EVAL_EQ(&(_C->e[M]), _P->x[j], _P->n) < 0) {
-        INCI AI = CEq_I[M];
-        Equation AE = _C->e[M];
-        CEq_I[M] = CEq_I[_C->ne];
-        _C->e[M] = _C->e[_C->ne];
-        CEq_I[_C->ne] = AI;
-        _C->e[_C->ne] = AE;
-        return ++_C->ne;
-      }
+    if ((has_negative != NULL) && has_negative[M]) {
+      INCI AI = CEq_I[M];
+      Equation AE = _C->e[M];
+      CEq_I[M] = CEq_I[_C->ne];
+      _C->e[M] = _C->e[_C->ne];
+      CEq_I[_C->ne] = AI;
+      _C->e[_C->ne] = AE;
+      VertexSwapNegativeFlag(has_negative, M, _C->ne);
+      free(has_negative);
+      return ++_C->ne;
+    }
+    if (has_negative == NULL)
+      for (j = 0; j < _P->np; j++)
+        if (EVAL_EQ(&(_C->e[M]), _P->x[j], _P->n) < 0) {
+          INCI AI = CEq_I[M];
+          Equation AE = _C->e[M];
+          CEq_I[M] = CEq_I[_C->ne];
+          _C->e[M] = _C->e[_C->ne];
+          CEq_I[_C->ne] = AI;
+          _C->e[_C->ne] = AE;
+          free(has_negative);
+          return ++_C->ne;
+        }
     if (_C->e[M].c < 1)
       *_IP = 0;
     assert(_F->ne < EQUA_Nmax);
@@ -1026,8 +1908,10 @@ int FE_Search_Bad_Eq(CEqList *_C, EqList *_F, INCI *CEq_I, INCI *F_I,
     if (M < _C->ne) {
       _C->e[M] = _C->e[_C->ne];
       CEq_I[M] = CEq_I[_C->ne];
+      VertexSwapNegativeFlag(has_negative, M, _C->ne);
     }
   }
+  free(has_negative);
   return 0;
 }
 
@@ -1072,19 +1956,30 @@ int FE_Search_Bad_Eq(CEqList *_C, EqList *_F, INCI *CEq_I, INCI *F_I,
 int REF_Search_Bad_Eq(CEqList *_C, EqList *_F, INCI *CEq_I, INCI *F_I,
                       PolyPointList *_P,
                       int *_REF) { /* return 0 :: no bad eq. */
+  uint8_t *has_negative = VertexAllocateNegativeFlags(_C, _P);
+
   while (_C->ne--) {
     int j;
-    for (j = 0; j < _P->np; j++)
-      if (EVAL_EQ(&(_C->e[_C->ne]), _P->x[j], _P->n) < 0)
-        return ++_C->ne;
+    if ((has_negative != NULL) && has_negative[_C->ne]) {
+      free(has_negative);
+      return ++_C->ne;
+    }
+    if (has_negative == NULL)
+      for (j = 0; j < _P->np; j++)
+        if (EVAL_EQ(&(_C->e[_C->ne]), _P->x[j], _P->n) < 0) {
+          free(has_negative);
+          return ++_C->ne;
+        }
     if (_C->e[_C->ne].c != 1) {
       *_REF = 0;
+      free(has_negative);
       return 1;
     }
     assert(_F->ne < EQUA_Nmax);
     _F->e[_F->ne] = _C->e[_C->ne];
     F_I[_F->ne++] = CEq_I[_C->ne];
   }
+  free(has_negative);
   return 0;
 }
 
