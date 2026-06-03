@@ -85,6 +85,7 @@ static CWSPrintWorkspace gCWSPrintWorkspace = {NULL, NULL};
  * Report goes to stderr (also on SIGTERM/SIGINT/SIGALRM and atexit). */
 #include <time.h>
 #include <signal.h>
+#include <unistd.h>
 
 typedef struct {
   int enabled;                       /* 0 off, 1 timing, 2 gen-only */
