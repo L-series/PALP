@@ -71,6 +71,101 @@ typedef struct {
 static Dim5RuntimeOptions gDim5RuntimeOptions = {1, 0};
 static CWSPrintWorkspace gCWSPrintWorkspace = {NULL, NULL};
 
+/* ====================================================================== */
+/* ==== Pipeline timing/throughput profiler (env-gated, no privileges) === */
+/* ====================================================================== */
+/* perf_event_paranoid is locked down on this cluster, so instead of an OS
+ * profiler we time the two heavy per-candidate stages (Make_CWS_Points and
+ * IP_Check) directly with rdtsc and emit machine-readable aggregate counters.
+ * Activated by environment variables (default off => zero overhead):
+ *   PALP_PROFILE_TIMING=1   time points+IP on every candidate (no stdout)
+ *   PALP_PROFILE_GENONLY=1  only count candidates and return (gen+enum cost)
+ *   PALP_PROFILE_LIMIT=<N>  stop & report after N candidates (clean exit)
+ * Comparing a GENONLY run against a TIMING run isolates the generation cost.
+ * Report goes to stderr (also on SIGTERM/SIGINT/SIGALRM and atexit). */
+#include <time.h>
+#include <signal.h>
+
+typedef struct {
+  int enabled;                       /* 0 off, 1 timing, 2 gen-only */
+  long limit;                        /* stop after N candidates (0 = none) */
+  int started;
+  int reported;
+  struct timespec t_start;
+  unsigned long long candidates;
+  unsigned long long points_cycles;  /* sum rdtsc over Make_CWS_Points */
+  unsigned long long ip_cycles;      /* sum rdtsc over IP_Check */
+  unsigned long long total_cycles;   /* sum rdtsc over points+IP per cand */
+  double total_cycles_sq;            /* sum of squares (double, no overflow) */
+  unsigned long long ip_pass;        /* IP_Check returned true */
+  unsigned long long np_sum;
+  unsigned long long np_lt6;         /* degenerate hull (np<6) */
+  unsigned long long min_cycles, max_cycles;
+  unsigned long long cyc_hist[48];   /* log2 buckets of per-cand total cycles */
+} ProfTiming;
+static ProfTiming gProf = {0};
+
+static inline unsigned long long prof_rdtsc(void) {
+  unsigned int lo, hi;
+  __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((unsigned long long)hi << 32) | lo;
+}
+
+static void prof_report(void) {
+  int b;
+  double secs;
+  struct timespec now;
+  if (!gProf.enabled || gProf.reported || gProf.candidates == 0)
+    return;
+  gProf.reported = 1;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  secs = (double)(now.tv_sec - gProf.t_start.tv_sec) +
+         (double)(now.tv_nsec - gProf.t_start.tv_nsec) / 1e9;
+  fprintf(stderr,
+          "PROF mode=%d candidates=%llu wall_secs=%.6f "
+          "points_cycles=%llu ip_cycles=%llu total_cycles=%llu "
+          "total_cycles_sq=%.6e ip_pass=%llu np_sum=%llu np_lt6=%llu "
+          "min_cycles=%llu max_cycles=%llu\n",
+          gProf.enabled, gProf.candidates, secs, gProf.points_cycles,
+          gProf.ip_cycles, gProf.total_cycles, gProf.total_cycles_sq,
+          gProf.ip_pass, gProf.np_sum, gProf.np_lt6, gProf.min_cycles,
+          gProf.max_cycles);
+  fprintf(stderr, "PROF_HIST");
+  for (b = 0; b < 48; b++)
+    if (gProf.cyc_hist[b])
+      fprintf(stderr, " %d:%llu", b, gProf.cyc_hist[b]);
+  fprintf(stderr, "\n");
+  fflush(stderr);
+}
+
+static void prof_sig(int s) {
+  (void)s;
+  prof_report();
+  _exit(0);
+}
+
+static int prof_maybe_init(void) {
+  static int init = 0;
+  if (!init) {
+    const char *t = getenv("PALP_PROFILE_TIMING");
+    const char *g = getenv("PALP_PROFILE_GENONLY");
+    const char *L = getenv("PALP_PROFILE_LIMIT");
+    if (t && *t)
+      gProf.enabled = 1;
+    else if (g && *g)
+      gProf.enabled = 2;
+    gProf.limit = (L && *L) ? atol(L) : 0;
+    if (gProf.enabled) {
+      signal(SIGTERM, prof_sig);
+      signal(SIGINT, prof_sig);
+      signal(SIGALRM, prof_sig);
+      atexit(prof_report);
+    }
+    init = 1;
+  }
+  return gProf.enabled;
+}
+
 #define OSL (30) /* opt_string's length */
 
 void PrintCWSUsage(char *c) {
@@ -2274,6 +2369,27 @@ static void BuildDim5BuiltinBasePools(Dim5WeightPool base_pools[],
   if (!need_five_weights)
     return;
 
+  /* The size-5 base pool is the published set of 184026 IP weight systems of
+   * length 5 (Kreuzer-Skarke).  Regenerating it from scratch via
+   * Make_34_Weights costs over a minute every run, so if PALP_W5_POOL names a
+   * readable file we load that pool directly instead (each line "d w0..w4",
+   * the same format Read_Weight and the CUDA scan's w5.ip use).  The point
+   * count of a candidate is invariant under the slot-swap symmetry, so the
+   * pool's row ordering does not affect any point-count distribution gathered
+   * from this enumeration.  With PALP_W5_POOL unset the original generator
+   * runs unchanged. */
+  {
+    const char *w5_path = getenv("PALP_W5_POOL");
+    if (w5_path && *w5_path) {
+      FILE *w5_file = fopen(w5_path, "r");
+      if (w5_file == NULL)
+        Die("Unable to open PALP_W5_POOL file");
+      LoadDim5BasePoolFromFile(w5_file, &base_pools[5]);
+      fclose(w5_file);
+      return;
+    }
+  }
+
   if ((generated_five_weights = tmpfile()) == NULL)
     Die("Unable to open tmpfile for read/write");
   outFILE = generated_five_weights;
@@ -2285,6 +2401,104 @@ static void BuildDim5BuiltinBasePools(Dim5WeightPool base_pools[],
 }
 
 void PRINT_CWS(CWS *CW) {
+  /* ---- profiling hook: pre-IP lattice-point-count distribution -----------
+   * When the environment variable PALP_PROFILE_NP=<stride> is set, every
+   * <stride>-th canonical candidate produced by the dim-5 enumeration is run
+   * through Make_CWS_Points (the very same point-enumeration the real
+   * classification pipeline performs) and its raw point count is emitted
+   * BEFORE the IP check as a line:
+   *      NP <np> <dim> <ip>
+   * where <np> = number of lattice points, <dim> = P->n (== POLY_Dmax iff the
+   * polytope is non-degenerate), and <ip> is 1/0 for full-dimensional
+   * candidates (IP / non-IP) or -1 for degenerate ones (IP check skipped).
+   * Candidates that are not sampled are skipped before Make_CWS_Points so the
+   * stride also bounds the runtime cost.  The hook returns early, suppressing
+   * the binary's normal output while profiling; with PALP_PROFILE_NP unset the
+   * function behaves exactly as before.  This only reuses existing PALP
+   * routines (the enumeration, Make_CWS_Points, IP_Check). */
+  {
+    static int prof_init = 0;
+    static long prof_stride = 0; /* 0 => profiling disabled */
+    static long prof_counter = 0;
+    if (!prof_init) {
+      const char *s = getenv("PALP_PROFILE_NP");
+      prof_stride = (s && *s) ? atol(s) : 0;
+      if (s && *s && prof_stride < 1)
+        prof_stride = 1;
+      prof_init = 1;
+    }
+    if (prof_stride > 0) {
+      PolyPointList *P;
+      EqList E;
+      VertexNumList V;
+      if ((prof_counter++ % prof_stride) != 0)
+        return; /* not sampled: skip the expensive point enumeration */
+      if (gCWSPrintWorkspace.P == NULL) {
+        gCWSPrintWorkspace.P = (PolyPointList *)malloc(sizeof(PolyPointList));
+        if (gCWSPrintWorkspace.P == NULL)
+          Die("Unable to allocate space for P");
+      }
+      P = gCWSPrintWorkspace.P;
+      CW->index = 1;
+      Make_CWS_Points(CW, P);
+      {
+        int ip = (P->n == POLY_Dmax) ? (IP_Check(P, &V, &E) ? 1 : 0) : -1;
+        fprintf(outFILE, "NP %d %d %d\n", P->np, P->n, ip);
+      }
+      return;
+    }
+  }
+  /* ---- pipeline timing/throughput profiler (PALP_PROFILE_TIMING/GENONLY) -- */
+  if (prof_maybe_init()) {
+    PolyPointList *P;
+    EqList E;
+    VertexNumList V;
+    unsigned long long c0, c1, c2, dtot;
+    int b;
+    if (!gProf.started) {
+      clock_gettime(CLOCK_MONOTONIC, &gProf.t_start);
+      gProf.started = 1;
+    }
+    if (gProf.enabled == 2) { /* generation + enumeration cost only */
+      gProf.candidates++;
+      if (gProf.limit && (long)gProf.candidates >= gProf.limit) {
+        prof_report();
+        _exit(0);
+      }
+      return;
+    }
+    if (gCWSPrintWorkspace.P == NULL) {
+      gCWSPrintWorkspace.P = (PolyPointList *)malloc(sizeof(PolyPointList));
+      if (gCWSPrintWorkspace.P == NULL)
+        Die("Unable to allocate space for P");
+    }
+    P = gCWSPrintWorkspace.P;
+    CW->index = 1;
+    c0 = prof_rdtsc();
+    Make_CWS_Points(CW, P);          /* stage 2: point enumeration */
+    c1 = prof_rdtsc();
+    { int ip = IP_Check(P, &V, &E);  /* stage 3: IP check (as in production) */
+      c2 = prof_rdtsc();
+      if (ip) gProf.ip_pass++; }
+    dtot = c2 - c0;
+    gProf.candidates++;
+    gProf.points_cycles += (c1 - c0);
+    gProf.ip_cycles += (c2 - c1);
+    gProf.total_cycles += dtot;
+    gProf.total_cycles_sq += (double)dtot * (double)dtot;
+    gProf.np_sum += (unsigned long long)P->np;
+    if (P->np < 6) gProf.np_lt6++;
+    if (gProf.candidates == 1 || dtot < gProf.min_cycles) gProf.min_cycles = dtot;
+    if (dtot > gProf.max_cycles) gProf.max_cycles = dtot;
+    b = 0; { unsigned long long v = dtot; while (v) { b++; v >>= 1; } }
+    if (b > 47) b = 47;
+    gProf.cyc_hist[b]++;
+    if (gProf.limit && (long)gProf.candidates >= gProf.limit) {
+      prof_report();
+      _exit(0);
+    }
+    return;
+  }
 #if (!Only_IP_CWS)
   {
     Print_CWS(CW);
