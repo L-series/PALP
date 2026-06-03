@@ -1035,13 +1035,51 @@ int Compute_X0(int N, CWS *_C, Long *X0) {
   return 0;
 }
 
+/* ---------- Helper: compute bounds for polytope coordinate x[j] ----------
+ * Bj       = B.x[j], the j-th basis row (triangular: first pivot > 0)
+ * offset   = accumulated contributions from higher coordinates
+ *            (offset[A] = sum_{k>j} x[k]*B.x[k][A])
+ * X0, Xmax = per-ambient-coordinate origin and upper-bound constants
+ * Alo, Ahi = ambient coordinate range for this level [Amin[j], Amin[j+1])
+ * Returns 1 if feasible, 0 if infeasible (R=0 range violation). */
+static inline int CLB(const Long *Bj, const Long *offset,
+                      const Long *X0, const Long *Xmax,
+                      int Alo, int Ahi, Long *lo, Long *hi) {
+  int A = Ahi - 1;
+  Long R = Bj[A]; /* first pivot always positive (triangular basis) */
+  Long Low = -X0[A] - offset[A];
+  Long Upp = Low + Xmax[A];
+  Long L;
+  *lo = -PD_Floor(-Low, R);
+  *hi = PD_Floor(Upp, R);
+  while (--A >= Alo) {
+    if ((R = Bj[A])) {
+      Low = -X0[A] - offset[A];
+      Upp = Low + Xmax[A];
+      if (R > 0) {
+        if (*hi > (L = PD_Floor(Upp, R))) *hi = L;
+        if (*lo < (L = -PD_Floor(-Low, R))) *lo = L;
+      } else {
+        if (*hi > (L = PD_Floor(-Low, -R))) *hi = L;
+        if (*lo < (L = -PD_Floor(Upp, -R))) *lo = L;
+      }
+    } else {
+      Long X = X0[A] + offset[A];
+      if (X < 0 || X > Xmax[A]) return 0;
+    }
+  }
+  return 1;
+}
+
 void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
   int i, j, Amin[POLY_Dmax + 1], m = Cin->nz;
-  Long *x = _P->x[_P->np = 0], xmin[POLY_Dmax], xmax[POLY_Dmax],
-       Xmax[AMBI_Dmax], X0[AMBI_Dmax], xaux[POLY_Dmax], L, R;
+  Long Xmax[AMBI_Dmax], X0[AMBI_Dmax];
   CWS *_C = Cin;
   CWLatticeBasis B;
   Long G[POLY_Dmax][POLY_Dmax], M[POLY_Dmax];
+
+  _P->np = 0;
+
 #ifndef NO_COORD_IMPROVEMENT /* ==== Perm Coord Improvement ==== */
   int pi[AMBI_Dmax];
   CWS Caux;
@@ -1056,141 +1094,187 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
   Cin->B.ne = _C->N;
 #endif /* = End of Perm Coord Improvement = */
   if (Cin->index == 1)
-    for (i = 0; i < Cin->N; i++)
-      X0[i] = 1;
+    for (i = 0; i < Cin->N; i++) X0[i] = 1;
   else if (!Compute_X0(Cin->N - 1, Cin, X0)) {
     _P->n = 0;
     puts("no X0!");
     return;
   }
-  /* X0 is the reference point in X-space that is transformed to the
-     origin of x-space for _P    */
-  /*printf("\nX0: ");for (i=0;i<Cin->N;i++) printf("%ld ", X0[i]);puts("");
-  for(i=0;i<Cin->nw;i++)     {
-    fprintf(outFILE,"%d ",(int) Cin->d[i]);
-    for(j=0;j<Cin->N;j++) fprintf(outFILE,"%d ",(int) Cin->W[i][j]);
-    if(i+1<Cin->nw) fprintf(outFILE," ");     }*/
+
   i = _P->n = B.n;
+  if (B.n == 0) goto do_sublat;
   Amin[0] = 0;
-  Amin[B.n] = j = B.N; /* inversion structure */
+  Amin[B.n] = j = B.N;
   while (--i) {
     while (!B.x[i - 1][--j])
       ;
     Amin[i] = ++j;
   }
-  for (i = 0; i < B.N; i++) /* compute Xmax */
-  {
+  for (i = 0; i < B.N; i++) {
+    Long L;
     Xmax[i] = 0;
     for (j = 0; j < _C->nw; j++)
       if (_C->W[j][i]) {
         L = _C->d[j] / _C->W[j][i];
-        if (Xmax[i]) {
-          if (L < Xmax[i])
-            Xmax[i] = L;
-        } else
-          Xmax[i] = L;
+        if (Xmax[i]) { if (L < Xmax[i]) Xmax[i] = L; }
+        else Xmax[i] = L;
       }
   }
-  j = B.n - 1;
-  i = Amin[j + 1] - 1;
-  R = B.x[j][i]; /* compute xmin[j] and xmax[j] */
-  xmin[j] = -PD_Floor(X0[i], R);
-  xmax[j] = PD_Floor(Xmax[i] - X0[i], R); /* since R > 0 */
-  /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
-  while ((i--) > Amin[j]) /* if(R=B.x[B.n-1][i]):  R!=0  => new limits */
-  {
-    Long Low = -X0[i], Upp = Low + Xmax[i];
-    R = B.x[B.n - 1][i];
-    if (R > 0) {
-      if (xmax[j] > (L = PD_Floor(Upp, R)))
-        xmax[j] = L;
-      if (xmin[j] < (L = -PD_Floor(-Low, R)))
-        xmin[j] = L;
-    } else {
-      if (xmax[j] > (L = PD_Floor(-Low, -R)))
-        xmax[j] = L;
-      if (xmin[j] < (L = -PD_Floor(Upp, -R)))
-        xmin[j] = L;
+
+#if POLY_Dmax >= 5
+  /* ====== Dimension-5 fast path ======
+   * Five nested for-loops with incremental level-accumulator arrays.
+   *  - Offset sum_{k>j} x[k]*B[k][A] is maintained incrementally via
+   *    lev arrays, reducing per-step cost from O(n-j) multiply-adds to
+   *    O(1) additions at the innermost levels.
+   *  - Static loop structure enables better register allocation.
+   *  - Batch point storage in the innermost sweep removes per-point
+   *    pointer management and bounds checks.
+   */
+  if (B.n == 5) {
+    const int A0 = 0, A1 = Amin[1], A2 = Amin[2],
+              A3 = Amin[3], A4 = Amin[4], A5 = Amin[5];
+    Long lev4[AMBI_Dmax], lev3[AMBI_Dmax],
+         lev2[AMBI_Dmax], lev1[AMBI_Dmax];
+    Long xmn4, xmx4, xmn3, xmx3, xmn2, xmx2, xmn1, xmx1, xmn0, xmx0;
+    int A;
+
+    /* Outermost bounds for x4 (no offset) */
+    { Long zero[AMBI_Dmax];
+      for (A = 0; A < A5; A++) zero[A] = 0;
+      if (!CLB(B.x[4], zero, X0, Xmax, A4, A5, &xmn4, &xmx4))
+        goto do_sublat;
     }
-    /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
-  } /* this completes the limits for x[B.n-1] */
-  x[j] = xmin[j];
-  while (j < B.n) {
-    int k;
-    if (x[j] > xmax[j]) {
-      if (B.n == (++j))
-        break;
-      else
-        x[j]++;
-    } else /* compute limits[j-1] and initialize x[j-1] */
-    {
-      Long Upp = Xmax[i = Amin[j--] - 1], Low = -X0[i];
-      int RangeFlag = 0;
-      for (k = j + 1; k < B.n; k++)
-        Low -= x[k] * B.x[k][i]; /* compute offset */
-      Upp += Low;
-      R = B.x[j][i];
-      xmin[j] = -PD_Floor(-Low, R);
-      xmax[j] = PD_Floor(Upp, R);
-      /** /printf("R=%2d:  %2d <= x[%d=&%d] <= %2d\n",R,xmin[j],j,i,xmax[j]);/
-       * **/
-      while ((i--) > Amin[j])
-        if ((R = B.x[j][i])) /* R!=0  => new limits */
-        {
-          Low = -X0[i];
-          Upp = Xmax[i];
-          for (k = j + 1; k < B.n; k++)
-            Low -= x[k] * B.x[k][i];
-          Upp += Low;
-          R = B.x[j][i];
-          if (R > 0) {
-            if (xmax[j] > (L = PD_Floor(Upp, R)))
-              xmax[j] = L;
-            if (xmin[j] < (L = -PD_Floor(-Low, R)))
-              xmin[j] = L;
+
+    /* Pre-seed lev4 one step before xmn4 for incremental update */
+    for (A = 0; A < A4; A++) lev4[A] = (xmn4 - 1) * B.x[4][A];
+
+    for (Long x4 = xmn4; x4 <= xmx4; x4++) {
+      for (A = 0; A < A4; A++) lev4[A] += B.x[4][A];
+      if (!CLB(B.x[3], lev4, X0, Xmax, A3, A4, &xmn3, &xmx3))
+        continue;
+
+      for (A = 0; A < A3; A++)
+        lev3[A] = lev4[A] + (xmn3 - 1) * B.x[3][A];
+
+      for (Long x3 = xmn3; x3 <= xmx3; x3++) {
+        for (A = 0; A < A3; A++) lev3[A] += B.x[3][A];
+        if (!CLB(B.x[2], lev3, X0, Xmax, A2, A3, &xmn2, &xmx2))
+          continue;
+
+        for (A = 0; A < A2; A++)
+          lev2[A] = lev3[A] + (xmn2 - 1) * B.x[2][A];
+
+        for (Long x2 = xmn2; x2 <= xmx2; x2++) {
+          for (A = 0; A < A2; A++) lev2[A] += B.x[2][A];
+          if (!CLB(B.x[1], lev2, X0, Xmax, A1, A2, &xmn1, &xmx1))
+            continue;
+
+          for (A = A0; A < A1; A++)
+            lev1[A] = lev2[A] + (xmn1 - 1) * B.x[1][A];
+
+          for (Long x1 = xmn1; x1 <= xmx1; x1++) {
+            for (A = A0; A < A1; A++) lev1[A] += B.x[1][A];
+            if (!CLB(B.x[0], lev1, X0, Xmax, A0, A1, &xmn0, &xmx0))
+              continue;
+
+            /* ---- Batch store x0 sweep ---- */
+            { int cnt = (int)(xmx0 - xmn0 + 1);
+              if (cnt > 0) {
+                if (_P->np + cnt > POINT_Nmax) {
+                  puts("Increase POINT_Nmax"); exit(0);
+                }
+                for (int c = 0; c < cnt; c++) {
+                  Long *p = _P->x[_P->np++];
+                  p[0] = xmn0 + c;
+                  p[1] = x1; p[2] = x2; p[3] = x3; p[4] = x4;
+                }
+              }
+            }
+          } /* x1 */
+        } /* x2 */
+      } /* x3 */
+    } /* x4 */
+    goto do_sublat;
+  }
+#endif /* POLY_Dmax >= 5 */
+
+  /* ====== Generic fallback (original algorithm) ====== */
+  { Long *x = _P->x[0], xmin[POLY_Dmax], xmax[POLY_Dmax],
+         xaux[POLY_Dmax], L, R;
+    j = B.n - 1;
+    i = Amin[j + 1] - 1;
+    R = B.x[j][i];
+    xmin[j] = -PD_Floor(X0[i], R);
+    xmax[j] = PD_Floor(Xmax[i] - X0[i], R);
+    while ((i--) > Amin[j]) {
+      Long Low = -X0[i], Upp = Low + Xmax[i];
+      R = B.x[B.n - 1][i];
+      if (R > 0) {
+        if (xmax[j] > (L = PD_Floor(Upp, R))) xmax[j] = L;
+        if (xmin[j] < (L = -PD_Floor(-Low, R))) xmin[j] = L;
+      } else {
+        if (xmax[j] > (L = PD_Floor(-Low, -R))) xmax[j] = L;
+        if (xmin[j] < (L = -PD_Floor(Upp, -R))) xmin[j] = L;
+      }
+    }
+    x[j] = xmin[j];
+    while (j < B.n) {
+      int k;
+      if (x[j] > xmax[j]) {
+        if (B.n == (++j)) break;
+        else x[j]++;
+      } else {
+        Long Upp = Xmax[i = Amin[j--] - 1], Low = -X0[i];
+        int RangeFlag = 0;
+        for (k = j + 1; k < B.n; k++)
+          Low -= x[k] * B.x[k][i];
+        Upp += Low;
+        R = B.x[j][i];
+        xmin[j] = -PD_Floor(-Low, R);
+        xmax[j] = PD_Floor(Upp, R);
+        while ((i--) > Amin[j])
+          if ((R = B.x[j][i])) {
+            Low = -X0[i]; Upp = Xmax[i];
+            for (k = j + 1; k < B.n; k++)
+              Low -= x[k] * B.x[k][i];
+            Upp += Low; R = B.x[j][i];
+            if (R > 0) {
+              if (xmax[j] > (L = PD_Floor(Upp, R))) xmax[j] = L;
+              if (xmin[j] < (L = -PD_Floor(-Low, R))) xmin[j] = L;
+            } else {
+              if (xmax[j] > (L = PD_Floor(-Low, -R))) xmax[j] = L;
+              if (xmin[j] < (L = -PD_Floor(Upp, -R))) xmin[j] = L;
+            }
           } else {
-            if (xmax[j] > (L = PD_Floor(-Low, -R)))
-              xmax[j] = L;
-            if (xmin[j] < (L = -PD_Floor(Upp, -R)))
-              xmin[j] = L;
+            Long X = X0[i];
+            for (k = j + 1; k < B.n; k++)
+              X += x[k] * B.x[k][i];
+            if ((X < 0) || (X > Xmax[i])) RangeFlag = 1;
           }
-          /** /printf("R=%2d:  %2d <= x[%d=&%d] <=
-           * %2d\n",R,xmin[j],j,i,xmax[j]);/ **/
-        } /* completes limits for x[] except */
-        else /*   when R=0 and X out of Range:  */
-        {
-          Long X = 1;
-          for (k = j + 1; k < B.n; k++)
-            X += x[k] * B.x[k][i];
-          if ((X < 0) || (X > Xmax[i]))
-            RangeFlag = 1;
-        }
-      if (RangeFlag)
-        ++x[++j];
-      else
-        x[j] = xmin[j];
-      if (j == 0) {
-        while (x[0] <= xmax[0]) {
-          Long *y;
-          if ((++_P->np) < POINT_Nmax) {
-            y = (_P->x[_P->np]);
-            for (k = 0; k < B.n; k++)
-              y[k] = x[k];
-          } else if (_P->np == POINT_Nmax) {
-            y = xaux;
-            for (k = 0; k < B.n; k++)
-              y[k] = x[k];
-          } else {
-            puts("Increase POINT_Nmax");
-            exit(0);
+        if (RangeFlag) ++x[++j];
+        else x[j] = xmin[j];
+        if (j == 0) {
+          while (x[0] <= xmax[0]) {
+            Long *y;
+            if ((++_P->np) < POINT_Nmax) {
+              y = (_P->x[_P->np]);
+              for (k = 0; k < B.n; k++) y[k] = x[k];
+            } else if (_P->np == POINT_Nmax) {
+              y = xaux;
+              for (k = 0; k < B.n; k++) y[k] = x[k];
+            } else {
+              puts("Increase POINT_Nmax"); exit(0);
+            }
+            x = y; ++x[0];
           }
-          x = y;
-          ++x[0];
+          x[j = 1]++;
         }
-        x[j = 1]++;
       }
     }
   }
+
+do_sublat:
   if (m)
     CWS_2_SublatZ(_C, &B, &m, M, G);
   if (m)
