@@ -1195,6 +1195,23 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
         } /* x2 */
       } /* x3 */
     } /* x4 */
+#ifdef DUMP_BASIS
+    /* Dump the triangular enumeration basis (rows) + X0 + Xmax + np + index per
+     * candidate, for the offline LLL / Fincke-Pohst node-count prototype
+     * (scripts/fp_enum.c).  Inert unless built with -DDUMP_BASIS; gated by the
+     * DUMP_STRIDE env var so a sparse representative sample can be collected. */
+    { static long dc = 0, ds = -1;
+      if (ds < 0) { const char *s = getenv("DUMP_STRIDE"); ds = (s && *s) ? atol(s) : 1; if (ds < 1) ds = 1; }
+      if ((dc++ % ds) == 0) {
+        int jj, A;
+        fprintf(stderr, "BASIS n=%d N=%d np=%d idx=%ld", B.n, B.N, _P->np, (long)Cin->index);
+        for (jj = 0; jj < B.n; jj++) { fprintf(stderr, " |"); for (A = 0; A < B.N; A++) fprintf(stderr, " %ld", (long)B.x[jj][A]); }
+        fprintf(stderr, " |0"); for (A = 0; A < B.N; A++) fprintf(stderr, " %ld", (long)X0[A]);
+        fprintf(stderr, " |X"); for (A = 0; A < B.N; A++) fprintf(stderr, " %ld", (long)Xmax[A]);
+        fprintf(stderr, "\n");
+      }
+    }
+#endif
     goto do_sublat;
   }
 #endif /* POLY_Dmax >= 5 */
