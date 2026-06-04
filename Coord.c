@@ -1071,6 +1071,350 @@ static inline int CLB(const Long *Bj, const Long *offset,
   return 1;
 }
 
+#ifdef LLLFP_WALK
+/* ============================================================================
+ *  LLL-reduced basis + Fincke-Pohst lattice-point walk (dim-5 fast path).
+ *
+ *  Replaces the triangular 5-nested-loop enumeration with a near-orthogonal
+ *  basis (LLL-reduced in the box-scaled metric <u,v> = sum_A u_A v_A / r_A^2,
+ *  r_A = Xmax_A/2) enumerated by integer box-constraint propagation over the
+ *  circumscribed-ellipsoid root box.  It enumerates the IDENTICAL set of
+ *  lattice points; the reduced-basis coefficients xp are mapped back to the
+ *  original triangular-basis coefficients via the unimodular U (b'_i = U_ij b_j),
+ *  so _P->x and all downstream code (sublattice reduction, IP_Check) are
+ *  byte-for-byte unaffected.  Correctness: U integer with |det U| = 1 => same
+ *  lattice; ellipsoid root box is a true superset of the feasible region; the
+ *  per-leaf box test is exact integer.  See repo LLL_FP_WALK.md.
+ *
+ *  Compiled only with -DLLLFP_WALK (stock build is unchanged).  Mode via the
+ *  PALP_WALK env var: unset/"fp" = use this walk, "tri" = keep triangular,
+ *  "check" = run both and assert set-equality (validation; output stays the
+ *  trusted triangular result).
+ *
+ *  No libm dependency: fabs/floor/ceil/round are inlined below and sqrt uses
+ *  __builtin_sqrt (baseline SSE2 sqrtsd; build with -fno-math-errno).
+ * ========================================================================== */
+
+#define LF_N 5
+
+static inline double lf_fabs(double x) { return x < 0 ? -x : x; }
+static inline long   lf_floorL(double v) { long f = (long)v; if ((double)f > v) f--; return f; }
+static inline long   lf_ceilL (double v) { long f = (long)v; if ((double)f < v) f++; return f; }
+static inline long long lf_lround(double v) { return (long long)(v >= 0 ? v + 0.5 : v - 0.5); }
+
+static int lf_mode(void) {        /* 0=tri, 1=fp(default), 2=check; cached */
+  static int m = -1;
+  if (m < 0) { const char *s = getenv("PALP_WALK");
+    if (!s || !*s) m = 1;
+    else if (!strcmp(s, "tri")) m = 0;
+    else if (!strcmp(s, "check")) m = 2;
+    else m = 1; }
+  return m;
+}
+
+/* The circumscribed-ellipsoid root box is a *superset*; for some bases it is
+ * loose enough that the walk would visit a huge empty subtree.  We bound the
+ * internal-node count per candidate and, on exceeding it, fall back to the
+ * proven triangular walk for that candidate (correct and finite).  Generous
+ * vs the realistic per-candidate node count (~1e2..1e6), tight enough to bound
+ * a runaway to well under a second.  Tunable via PALP_LF_NODECAP. */
+#define LF_NODE_CAP_DEFAULT 8000000LL
+static long long lf_node_cap(void) {
+  static long long c = -1;
+  if (c < 0) { const char *s = getenv("PALP_LF_NODECAP"); c = (s && *s) ? atoll(s) : LF_NODE_CAP_DEFAULT; if (c < 1) c = LF_NODE_CAP_DEFAULT; }
+  return c;
+}
+/* Heavy-tail gate: the LLL + ellipsoid setup costs ~1e4 cycles/candidate, so fp
+ * only pays off on candidates whose triangular walk would cost much more than
+ * that.  The bulk of candidates are light (small box, np~9), where the overhead
+ * is pure loss.  Gate on a cheap pre-walk proxy for box size -- sum of the
+ * bit-lengths of Xmax (~ log2 of the box volume).  PALP_LF_LOGVOL_MIN sets the
+ * threshold; 0 (default) = gate off = always fp (legacy behaviour). */
+static long long lf_logvol_min(void) {
+  static long long t = -2;
+  if (t == -2) { const char *s = getenv("PALP_LF_LOGVOL_MIN"); t = (s && *s) ? atoll(s) : 0; }
+  return t;
+}
+static int lf_heavy(const Long *Xmax, int N) {
+  long long thr = lf_logvol_min();
+  if (thr <= 0) return 1;
+  long long lv = 0;
+  for (int A = 0; A < N; A++) { Long x = Xmax[A]; while (x > 0) { lv++; x >>= 1; } }
+  return lv >= thr;
+}
+/* fp-walk accounting (candidates handled vs fallbacks); reported at exit. */
+static long long lf_fp_tot = 0, lf_fp_abort = 0, lf_fp_light = 0;
+static void lf_fp_report(void) {
+  static int done = 0; if (done) return; done = 1;
+  long long seen = lf_fp_tot + lf_fp_light;
+  if (seen)
+    fprintf(stderr, "[LFFP] candidates=%lld  fp-walk=%lld  light(triangular-gate)=%lld"
+            "  fp-node-fallback=%lld\n", seen, lf_fp_tot, lf_fp_light, lf_fp_abort);
+}
+
+static inline long long lf_fdiv(long long a, long long b) {   /* floor(a/b) */
+  long long q = a / b, r = a % b; if (r && ((a < 0) != (b < 0))) q--; return q; }
+static inline long long lf_cdiv(long long a, long long b) {   /* ceil(a/b) */
+  long long q = a / b, r = a % b; if (r && ((a < 0) == (b < 0))) q++; return q; }
+
+/* Gram-Schmidt in the box-scaled metric (weights w[A] = 1/r_A^2). */
+static void lf_gso(Long b[LF_N][AMBI_Dmax], int n, int N, const double *w,
+                   double mu[LF_N][LF_N], double *B2) {
+  double bs[LF_N][AMBI_Dmax];
+  for (int i = 0; i < n; i++) {
+    for (int A = 0; A < N; A++) bs[i][A] = (double)b[i][A];
+    for (int j = 0; j < i; j++) {
+      double dot = 0, nj = B2[j];
+      for (int A = 0; A < N; A++) dot += (double)b[i][A] * bs[j][A] * w[A];
+      mu[i][j] = (nj > 0) ? dot / nj : 0.0;
+      for (int A = 0; A < N; A++) bs[i][A] -= mu[i][j] * bs[j][A];
+    }
+    double nn = 0; for (int A = 0; A < N; A++) nn += bs[i][A] * bs[i][A] * w[A];
+    B2[i] = nn;
+  }
+}
+/* exact determinant of a small integer matrix (fraction-free Bareiss) */
+static long long lf_idet(long long M[LF_N][LF_N], int n) {
+  long long prev = 1;
+  for (int k = 0; k < n; k++) {
+    if (M[k][k] == 0) { int s = -1;
+      for (int i = k + 1; i < n; i++) if (M[i][k]) { s = i; break; }
+      if (s < 0) return 0;
+      for (int j = 0; j < n; j++) { long long t = M[k][j]; M[k][j] = M[s][j]; M[s][j] = t; }
+      prev = -prev; }
+    for (int i = k + 1; i < n; i++)
+      for (int j = k + 1; j < n; j++)
+        M[i][j] = (M[i][j] * M[k][k] - M[i][k] * M[k][j]) / prev;
+    prev = M[k][k];
+  }
+  return M[n - 1][n - 1];
+}
+/* LLL-reduce b (rows) in the scaled metric; fill U (b'_i = sum_j U_ij b_j_orig);
+ * return det(U) (mathematically always +-1; checked defensively by caller). */
+static long long lf_lll_reduce(Long b[LF_N][AMBI_Dmax], int n, int N,
+                               const double *w, double delta, long long U[LF_N][LF_N]) {
+  for (int i = 0; i < n; i++) for (int j = 0; j < n; j++) U[i][j] = (i == j);
+  double mu[LF_N][LF_N], B2[LF_N];
+  lf_gso(b, n, N, w, mu, B2);
+  int k = 1, guard = 0;
+  while (k < n && guard++ < 100000) {
+    for (int l = k - 1; l >= 0; l--) {
+      if (lf_fabs(mu[k][l]) > 0.5) {
+        long long q = lf_lround(mu[k][l]);
+        if (q) {
+          for (int A = 0; A < N; A++) b[k][A] -= q * b[l][A];
+          for (int j = 0; j < n; j++) U[k][j] -= q * U[l][j];
+          /* size reduction leaves the GSO vectors b* (and B2) unchanged; only
+           * the mu coefficients shift -- update them in O(n), no full re-GSO. */
+          for (int j = 0; j < l; j++) mu[k][j] -= (double)q * mu[l][j];
+          mu[k][l] -= (double)q;
+        }
+      }
+    }
+    if (B2[k] >= (delta - mu[k][k - 1] * mu[k][k - 1]) * B2[k - 1]) k++;
+    else {
+      for (int A = 0; A < N; A++) { Long t = b[k][A]; b[k][A] = b[k - 1][A]; b[k - 1][A] = t; }
+      for (int j = 0; j < n; j++) { long long t = U[k][j]; U[k][j] = U[k - 1][j]; U[k - 1][j] = t; }
+      lf_gso(b, n, N, w, mu, B2);
+      k = (k - 1 > 1) ? k - 1 : 1;
+    }
+  }
+  long long Uc[LF_N][LF_N];
+  for (int i = 0; i < n; i++) for (int j = 0; j < n; j++) Uc[i][j] = U[i][j];
+  return lf_idet(Uc, n);
+}
+/* solve G x = rhs (SPD, n<=5) by Gauss-Jordan; also return inverse diagonal */
+static int lf_spd_solve(double G[LF_N][LF_N], int n, double *rhs, double *x, double *invdiag) {
+  double A[LF_N][2 * LF_N];
+  for (int i = 0; i < n; i++) { for (int j = 0; j < n; j++) { A[i][j] = G[i][j]; A[i][n + j] = (i == j); } }
+  for (int c = 0; c < n; c++) {
+    int piv = c; double best = lf_fabs(A[c][c]);
+    for (int r = c + 1; r < n; r++) if (lf_fabs(A[r][c]) > best) { best = lf_fabs(A[r][c]); piv = r; }
+    if (best < 1e-12) return 0;
+    if (piv != c) for (int j = 0; j < 2 * n; j++) { double t = A[c][j]; A[c][j] = A[piv][j]; A[piv][j] = t; }
+    double d = A[c][c]; for (int j = 0; j < 2 * n; j++) A[c][j] /= d;
+    for (int r = 0; r < n; r++) if (r != c) { double f = A[r][c]; for (int j = 0; j < 2 * n; j++) A[r][j] -= f * A[c][j]; }
+  }
+  for (int i = 0; i < n; i++) { invdiag[i] = A[i][n + i];
+    double s = 0; for (int j = 0; j < n; j++) s += A[i][n + j] * rhs[j]; x[i] = s; }
+  return 1;
+}
+
+typedef struct {
+  int n, N;
+  Long b[LF_N][AMBI_Dmax];        /* LLL-reduced basis b' (rows)            */
+  long long U[LF_N][LF_N];        /* b'_i = sum_j U_ij b_orig_j             */
+  const Long *X0, *Xmax;
+  Long Lo[LF_N], Hi[LF_N];        /* root search box (superset)             */
+  int  ord[LF_N];                 /* enumeration order, outer..inner        */
+  Long xp[LF_N];                  /* current coeff per basis-row index      */
+  PolyPointList *P;
+  long long nodes, cap;           /* internal-node budget (runaway guard)   */
+  int abort;                      /* set when cap exceeded -> caller falls back */
+} LFWalk;
+
+static inline void lf_store(LFWalk *g) {        /* map xp via U, store B-coords */
+  PolyPointList *P = g->P;
+  if (P->np >= POINT_Nmax) { puts("Increase POINT_Nmax"); exit(0); }
+  Long *out = P->x[P->np++];
+  for (int j = 0; j < g->n; j++) {
+    long long s = 0;
+    for (int i = 0; i < g->n; i++) s += g->xp[i] * g->U[i][j];
+    out[j] = (Long)s;
+  }
+}
+static void lf_rec(LFWalk *g, int depth, const Long *accum) {
+  int n = g->n, N = g->N;
+  if (depth == n) {                              /* leaf: exact integer box test */
+    for (int A = 0; A < N; A++)
+      if (accum[A] < 0 || accum[A] > g->Xmax[A]) return;
+    lf_store(g);
+    return;
+  }
+  if (++g->nodes > g->cap) { g->abort = 1; return; }   /* runaway guard */
+  int w = g->ord[depth];
+  Long lo = g->Lo[w], hi = g->Hi[w];
+  for (int A = 0; A < N && lo <= hi; A++) {
+    Long c = g->b[w][A];
+    long long sLo = 0, sHi = 0;                  /* deeper free vars' range on A */
+    for (int d = depth + 1; d < n; d++) {
+      int j = g->ord[d]; Long bb = g->b[j][A];
+      if (bb > 0) { sLo += (long long)bb * g->Lo[j]; sHi += (long long)bb * g->Hi[j]; }
+      else        { sLo += (long long)bb * g->Hi[j]; sHi += (long long)bb * g->Lo[j]; }
+    }
+    long long base = accum[A];
+    long long K1 = -base - sHi;                  /* need c*x_w >= K1 */
+    long long K2 = (long long)g->Xmax[A] - base - sLo; /* and c*x_w <= K2 */
+    if (c > 0) { long long t = lf_cdiv(K1, c); if (t > lo) lo = t;
+                 t = lf_fdiv(K2, c); if (t < hi) hi = t; }
+    else if (c < 0) { long long t = lf_fdiv(K1, c); if (t < hi) hi = t;
+                      t = lf_cdiv(K2, c); if (t > lo) lo = t; }
+    else { if (base + sHi < 0 || base + sLo > g->Xmax[A]) return; }  /* c==0: prune */
+  }
+  Long child[AMBI_Dmax];
+  for (Long x = lo; x <= hi && !g->abort; x++) {
+    g->xp[w] = x;
+    for (int A = 0; A < N; A++) child[A] = accum[A] + x * g->b[w][A];
+    lf_rec(g, depth + 1, child);
+  }
+}
+/* The walk: LLL-reduce, build ellipsoid root box, enumerate, store into P.
+ * Returns 1 on success, 0 if the node budget was exceeded (caller must reset
+ * P->np and fall back to the triangular walk). */
+static int lf_walk_dim5(const CWLatticeBasis *B, const Long *X0,
+                        const Long *Xmax, PolyPointList *P) {
+  LFWalk g;
+  int n = B->n, N = B->N, i, j, A;
+  g.n = n; g.N = N; g.X0 = X0; g.Xmax = Xmax; g.P = P;
+  g.nodes = 0; g.cap = lf_node_cap(); g.abort = 0;
+  for (i = 0; i < n; i++) for (A = 0; A < N; A++) g.b[i][A] = B->x[i][A];
+
+  double w[AMBI_Dmax];
+  for (A = 0; A < N; A++) { double rr = (Xmax[A] > 0) ? Xmax[A] / 2.0 : 0.5; w[A] = 1.0 / (rr * rr); }
+  long long det = lf_lll_reduce(g.b, n, N, w, 0.99, g.U);
+  if (det != 1 && det != -1) {       /* defensive: revert to triangular basis */
+    for (i = 0; i < n; i++) { for (A = 0; A < N; A++) g.b[i][A] = B->x[i][A];
+                              for (j = 0; j < n; j++) g.U[i][j] = (i == j); }
+  }
+  /* circumscribed ellipsoid of {0<=X_A<=Xmax_A}: sum_A ((X_A-cc_A)/r_A)^2 <= rho */
+  double cc[AMBI_Dmax], r[AMBI_Dmax], t[AMBI_Dmax], rho = 0, tt = 0;
+  for (A = 0; A < N; A++) { if (Xmax[A] > 0) { cc[A] = Xmax[A] / 2.0; r[A] = Xmax[A] / 2.0; rho += 1.0; }
+                            else { cc[A] = 0.0; r[A] = 0.5; } }
+  for (A = 0; A < N; A++) { t[A] = (cc[A] - X0[A]) / r[A]; tt += t[A] * t[A]; }
+  double G[LF_N][LF_N], gv[LF_N];
+  for (i = 0; i < n; i++) {
+    gv[i] = 0; for (A = 0; A < N; A++) gv[i] += (g.b[i][A] / r[A]) * t[A];
+    for (j = 0; j < n; j++) {
+      double s = 0;
+      for (A = 0; A < N; A++) s += (g.b[i][A] / r[A]) * (g.b[j][A] / r[A]);
+      G[i][j] = s;
+    }
+  }
+  double xhat[LF_N], invdiag[LF_N];
+  if (!lf_spd_solve(G, n, gv, xhat, invdiag)) { for (j = 0; j < n; j++) { xhat[j] = 0; invdiag[j] = 0; } }
+  double res = tt; for (i = 0; i < n; i++) res -= gv[i] * xhat[i];
+  double rho2 = rho - res + 1e-6; if (rho2 < 0) rho2 = 0;
+  for (j = 0; j < n; j++) { double hw = (invdiag[j] > 0) ? __builtin_sqrt(rho2 * invdiag[j]) : 0.0;
+    g.Lo[j] = lf_floorL(xhat[j] - hw) - 2;       /* +/-2 guard vs FP error */
+    g.Hi[j] = lf_ceilL (xhat[j] + hw) + 2; }
+  /* enumeration order: longest GSO vector (scaled metric) outermost */
+  { double mu[LF_N][LF_N], B2[LF_N]; Long tmp[LF_N][AMBI_Dmax];
+    for (i = 0; i < n; i++) for (A = 0; A < N; A++) tmp[i][A] = g.b[i][A];
+    lf_gso(tmp, n, N, w, mu, B2);
+    int used[LF_N]; for (j = 0; j < n; j++) used[j] = 0;
+    for (int s = 0; s < n; s++) { int best = -1; double bv = -1;
+      for (j = 0; j < n; j++) if (!used[j] && B2[j] > bv) { bv = B2[j]; best = j; }
+      used[best] = 1; g.ord[s] = best; } }
+  Long accum0[AMBI_Dmax]; for (A = 0; A < N; A++) accum0[A] = X0[A];
+  lf_rec(&g, 0, accum0);
+  lf_fp_tot++;
+  if (g.abort) { lf_fp_abort++; return 0; }
+  return 1;
+}
+
+/* Dispatch: gate light candidates to the triangular walk; run fp on heavy ones.
+ * Returns 1 if P was filled (caller skips the triangular path), 0 otherwise. */
+static int lf_fp_enumerate(const CWLatticeBasis *B, const Long *X0,
+                           const Long *Xmax, PolyPointList *P) {
+  static int reg = 0; if (!reg) { atexit(lf_fp_report); reg = 1; }
+  if (!lf_heavy(Xmax, B->N)) { lf_fp_light++; return 0; }  /* light -> triangular */
+  return lf_walk_dim5(B, X0, Xmax, P);                     /* heavy: fp (0 if it fell back) */
+}
+
+/* ---- check mode: run the FP walk into a scratch list and compare the point
+ *      SET (order-independent 128-bit multiset hash) against the triangular
+ *      result already in Ptri; report mismatches.  Used for validation only. */
+static long long lf_chk_tot = 0, lf_chk_ok = 0, lf_chk_bad = 0,
+                 lf_chk_fb = 0, lf_chk_max = -1;
+static void lf_chk_report(void) {
+  static int done = 0; if (done) return; done = 1;
+  fprintf(stderr, "[LFCHK] candidates=%lld  set-identical=%lld  mismatch=%lld"
+          "  fp-fallback=%lld\n", lf_chk_tot, lf_chk_ok, lf_chk_bad, lf_chk_fb);
+}
+static void lf_set_hash(const PolyPointList *P, unsigned long long *h1, unsigned long long *h2) {
+  unsigned long long a1 = 0, a2 = 0;
+  for (int p = 0; p < P->np; p++) {
+    unsigned long long x1 = 1469598103934665603ULL, x2 = 14695981039346656037ULL;
+    for (int j = 0; j < P->n; j++) {
+      unsigned long long v = (unsigned long long)(long long)P->x[p][j];
+      x1 = (x1 ^ v) * 1099511628211ULL;
+      x2 = (x2 ^ (v + 0x9e3779b97f4a7c15ULL)) * 1099511628211ULL;
+    }
+    a1 += (x1 | 1ULL); a2 += (x2 | 1ULL);
+  }
+  *h1 = a1; *h2 = a2;
+}
+static void lf_check_dim5(const CWLatticeBasis *B, const Long *X0,
+                          const Long *Xmax, const PolyPointList *Ptri, long idx) {
+  static PolyPointList *Pf = NULL;
+  static int reg = 0;
+  if (!reg) { atexit(lf_chk_report); reg = 1;
+    const char *s = getenv("PALP_LFCHK_MAX"); lf_chk_max = (s && *s) ? atoll(s) : 0; }
+  if (!Pf) { Pf = (PolyPointList *)malloc(sizeof(PolyPointList));
+             if (!Pf) { fprintf(stderr, "[LFCHK] malloc failed\n"); return; } }
+  Pf->n = Ptri->n; Pf->np = 0;
+  int fp_ok = lf_walk_dim5(B, X0, Xmax, Pf);
+  lf_chk_tot++;
+  if (!fp_ok) { lf_chk_fb++; }       /* fp hit node budget -> triangular fallback */
+  else {
+    int ok = (Pf->np == Ptri->np);
+    if (ok) { unsigned long long a1, a2, b1, b2;
+      lf_set_hash(Ptri, &a1, &a2); lf_set_hash(Pf, &b1, &b2);
+      ok = (a1 == b1 && a2 == b2); }
+    if (ok) lf_chk_ok++;
+    else { lf_chk_bad++;
+      fprintf(stderr, "[LFCHK] MISMATCH idx=%ld N=%d tri_np=%d fp_np=%d\n",
+              idx, B->N, Ptri->np, Pf->np); }
+  }
+  if ((lf_chk_tot % 500000) == 0)
+    fprintf(stderr, "[LFCHK] progress: candidates=%lld mismatch=%lld\n",
+            lf_chk_tot, lf_chk_bad);
+  if (lf_chk_max > 0 && lf_chk_tot >= lf_chk_max) {   /* bounded clean exit */
+    lf_chk_report(); fflush(NULL); exit(0);
+  }
+}
+#endif /* LLLFP_WALK */
+
 void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
   int i, j, Amin[POLY_Dmax + 1], m = Cin->nz;
   Long Xmax[AMBI_Dmax], X0[AMBI_Dmax];
@@ -1138,6 +1482,17 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
          lev2[AMBI_Dmax], lev1[AMBI_Dmax];
     Long xmn4, xmx4, xmn3, xmx3, xmn2, xmx2, xmn1, xmx1, xmn0, xmx0;
     int A;
+
+#ifdef LLLFP_WALK
+    /* LLL + Fincke-Pohst replacement (see block above). fp: enumerate via the
+     * reduced basis and skip the triangular loops entirely.  If the walk
+     * exceeds its node budget it returns 0; reset and fall through to the
+     * (always-correct, finite) triangular path for this candidate. */
+    if (lf_mode() == 1) {
+      if (lf_fp_enumerate(&B, X0, Xmax, _P)) goto do_sublat;
+      _P->np = 0;   /* light candidate or fp fell back -> triangular walk below */
+    }
+#endif
 
     /* Outermost bounds for x4 (no offset) */
     { Long zero[AMBI_Dmax];
@@ -1211,6 +1566,11 @@ void Make_CWS_Points(CWS *Cin, PolyPointList *_P) {
         fprintf(stderr, "\n");
       }
     }
+#endif
+#ifdef LLLFP_WALK
+    /* check mode: validate the FP walk against the triangular result just
+     * computed into _P (which remains the trusted output). */
+    if (lf_mode() == 2) lf_check_dim5(&B, X0, Xmax, _P, (long)Cin->index);
 #endif
     goto do_sublat;
   }
