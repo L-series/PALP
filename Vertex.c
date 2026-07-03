@@ -15,6 +15,96 @@ typedef struct {
 } CEqList;
 
 /*  ======================================================================  */
+/*  SIMD dot-product block for the dim-5 point scans (opt-in PALP_SIMD_SCAN)  */
+/*                                                                            */
+/*  The convex-hull hot loops (FE_Search_Bad_Eq, Search_New_Vertex) each      */
+/*  scan every one of _P->np points evaluating the linear form                */
+/*      Eval(E, x) = E->c + sum_{k<5} E->a[k]*x[k].                           */
+/*  These do not auto-vectorize (early-exit / arg-min control flow).  We move */
+/*  ONLY the arithmetic into AVX-512, evaluating 8 points per iteration.      */
+/*                                                                            */
+/*  A gather over the AoS point list (stride 5 Long) loses badly on Zen4, so  */
+/*  instead we transpose the point list to SoA once per Find_Equations (rows  */
+/*  of a single coordinate, contiguous) and reuse it across the dozens of     */
+/*  scans that one hull computation performs -- then each block is 5 straight */
+/*  vector loads.  The transpose is cached in a thread-local buffer, valid    */
+/*  only inside the palp_xt_begin/end scan region where _P's points are       */
+/*  provably invariant (Make_New_CEqs only reads them).                       */
+/*                                                                            */
+/*  mullo_epi64 keeps the low 64 bits, identical to a `long` multiply, so the */
+/*  callers keep their EXACT scalar decision logic -- same branches, same     */
+/*  Vec_Greater_Than tie-breaks -- and the normal form is bit-for-bit         */
+/*  unchanged.  Verified against the golden NF set.                           */
+#if defined(PALP_SIMD_SCAN) && (POLY_Dmax == 5) &&                             \
+    defined(__AVX512F__) && defined(__AVX512DQ__)
+#include <immintrin.h>
+#include <stdlib.h>
+#define PALP_HAVE_SIMD_SCAN 1
+
+/* Gate: only take the SIMD path when np is large enough to amortise the
+   transpose (small np dominates the corpus and is faster scalar). Tunable via
+   PALP_SIMD_MIN_NP; default 96 (flat optimum 32-128 measured on Zen4). Cached. */
+static inline int palp_simd_min_np(void) {
+  static int t = -1;
+  if (t < 0) { const char *s = getenv("PALP_SIMD_MIN_NP");
+               t = (s && *s) ? atoi(s) : 96; if (t < 0) t = 0; }
+  return t;
+}
+
+/* Thread-local SoA transpose of the active point list: 5 contiguous rows of
+   g_xt_np Longs, xt[k*np + j] == _P->x[j][k]. Valid only while g_xt_key != 0. */
+static __thread Long *g_xt = NULL;
+static __thread long   g_xt_cap = 0;   /* Longs allocated                     */
+static __thread long   g_xt_np = 0;    /* row length of the current transpose */
+static __thread const void *g_xt_key = NULL; /* _P the transpose belongs to   */
+
+/* Open a scan region: (re)build the transpose for _P and mark it valid. */
+static void palp_xt_begin(const PolyPointList *_P) {
+  long np = _P->np;
+  if (np < palp_simd_min_np()) { g_xt_key = NULL; return; } /* scalar region */
+  if (5 * np > g_xt_cap) {
+    free(g_xt);
+    g_xt = (Long *)malloc(sizeof(Long) * 5 * np);
+    g_xt_cap = g_xt ? 5 * np : 0;
+    if (!g_xt) { g_xt_cap = 0; g_xt_key = NULL; return; } /* fall back scalar */
+  }
+  /* Read each point's 5 contiguous coords once, scatter to the 5 rows. */
+  for (long j = 0; j < np; j++) {
+    const Long *xp = _P->x[j];
+    g_xt[0 * np + j] = xp[0];
+    g_xt[1 * np + j] = xp[1];
+    g_xt[2 * np + j] = xp[2];
+    g_xt[3 * np + j] = xp[3];
+    g_xt[4 * np + j] = xp[4];
+  }
+  g_xt_np = np;
+  g_xt_key = _P;
+}
+static inline void palp_xt_end(void) { g_xt_key = NULL; }
+/* True iff the cached transpose is valid for this exact _P/np. */
+static inline int palp_xt_ok(const PolyPointList *_P) {
+  return g_xt_key == (const void *)_P && g_xt_np == _P->np;
+}
+
+/* out[0..7] = Eval(E, point[j0+lane]) from the SoA transpose; j0+8 <= np. */
+static inline void eval_eq_block8_xt(const Equation *E, int j0, Long *out) {
+  const long np = g_xt_np;
+  __m512i acc = _mm512_set1_epi64(E->c);
+  acc = _mm512_add_epi64(acc, _mm512_mullo_epi64(
+      _mm512_loadu_si512((void *)(g_xt + 0 * np + j0)), _mm512_set1_epi64(E->a[0])));
+  acc = _mm512_add_epi64(acc, _mm512_mullo_epi64(
+      _mm512_loadu_si512((void *)(g_xt + 1 * np + j0)), _mm512_set1_epi64(E->a[1])));
+  acc = _mm512_add_epi64(acc, _mm512_mullo_epi64(
+      _mm512_loadu_si512((void *)(g_xt + 2 * np + j0)), _mm512_set1_epi64(E->a[2])));
+  acc = _mm512_add_epi64(acc, _mm512_mullo_epi64(
+      _mm512_loadu_si512((void *)(g_xt + 3 * np + j0)), _mm512_set1_epi64(E->a[3])));
+  acc = _mm512_add_epi64(acc, _mm512_mullo_epi64(
+      _mm512_loadu_si512((void *)(g_xt + 4 * np + j0)), _mm512_set1_epi64(E->a[4])));
+  _mm512_storeu_si512((void *)out, acc);
+}
+#endif
+
+/*  ======================================================================  */
 /*  ==========		     			  		==========  */
 /*  ==========	   I N C I D E N C E S (as bit patterns)	==========  */
 /*  ==========							==========  */
@@ -483,7 +573,31 @@ int IsGoodCEq(Equation *_E, PolyPointList *_P, VertexNumList *_V) {
 int Search_New_Vertex(Equation *_E, PolyPointList *_P) {
   int i, v = 0;
   Long *X = _P->x[0], x = EVAL_EQ(_E, X, _P->n);
-  for (i = 1; i < _P->np; i++) {
+#ifdef PALP_HAVE_SIMD_SCAN
+  /* Vectorise the dot products (8 points/block); the arg-min decision below is
+     the original scalar logic verbatim, so the selected vertex is identical. */
+  int jb = 0;
+  if (palp_xt_ok(_P))
+  for (; jb + 8 <= _P->np; jb += 8) {
+    Long out[8];
+    eval_eq_block8_xt(_E, jb, out);
+    for (int m = (jb == 0 ? 1 : 0); m < 8; m++) { /* skip point 0 (the init) */
+      Long *Y = _P->x[jb + m], y = out[m];
+      if (y > x)
+        continue;
+      if (y == x)
+        if (Vec_Greater_Than(X, Y, _P->n))
+          continue;
+      v = jb + m;
+      X = Y;
+      x = y;
+    }
+  }
+  i = (jb == 0) ? 1 : jb; /* scalar tail: remaining points past full blocks */
+#else
+  i = 1;
+#endif
+  for (; i < _P->np; i++) {
     Long *Y = _P->x[i], y = EVAL_EQ(_E, Y, _P->n);
     if (y > x)
       continue;
@@ -1040,10 +1154,24 @@ int IP_Search_Bad_Eq(CEqList *_C, EqList *_F, INCI *CEq_I, INCI *F_I,
 int FE_Search_Bad_Eq(CEqList *_C, EqList *_F, INCI *CEq_I, INCI *F_I,
                      PolyPointList *_P, int *_IP) { /* return 0 :: no bad eq. */
   while (_C->ne--) {
-    int j;
-    for (j = 0; j < _P->np; j++)
-      if (EVAL_EQ(&(_C->e[_C->ne]), _P->x[j], _P->n) < 0)
-        return ++_C->ne;
+    const Equation *E = &(_C->e[_C->ne]);
+    int j = 0, bad = 0; /* bad == "some point violates E" (value-only test) */
+#ifdef PALP_HAVE_SIMD_SCAN
+    if (palp_xt_ok(_P))
+    for (; j + 8 <= _P->np; j += 8) {
+      Long out[8];
+      eval_eq_block8_xt(E, j, out);
+      for (int m = 0; m < 8; m++)
+        if (out[m] < 0) { bad = 1; break; }
+      if (bad)
+        break;
+    }
+#endif
+    if (!bad)
+      for (; j < _P->np; j++)
+        if (EVAL_EQ(E, _P->x[j], _P->n) < 0) { bad = 1; break; }
+    if (bad)
+      return ++_C->ne;
     if (_C->e[_C->ne].c < 1)
       *_IP = 0;
     assert(_F->ne < EQUA_Nmax);
@@ -1077,12 +1205,21 @@ int REF_Search_Bad_Eq(CEqList *_C, EqList *_F, INCI *CEq_I, INCI *F_I,
 int Finish_Find_Equations(PolyPointList *_P, VertexNumList *_V, EqList *_F,
                           CEqList *_CEq, INCI *F_I, INCI *CEq_I) {
   int IP = 1;
+#ifdef PALP_HAVE_SIMD_SCAN
+  /* Points are invariant across this loop (Make_New_CEqs only reads them), so
+     build the SoA transpose once here and reuse it in every FE_Search_Bad_Eq /
+     Search_New_Vertex block below. */
+  palp_xt_begin(_P);
+#endif
   while (0 <= _CEq->ne)
     if (FE_Search_Bad_Eq(_CEq, _F, CEq_I, F_I, _P, &IP)) {
       assert(_V->nv < VERT_Nmax);
       _V->v[_V->nv++] = Search_New_Vertex(&(_CEq->e[_CEq->ne - 1]), _P);
       Make_New_CEqs(_P, _V, _CEq, _F, CEq_I, F_I);
     }
+#ifdef PALP_HAVE_SIMD_SCAN
+  palp_xt_end();
+#endif
   return IP;
 }
 
