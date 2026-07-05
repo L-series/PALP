@@ -1,5 +1,17 @@
 #include "Global.h"
 #include "Rat.h"
+#include <setjmp.h>
+
+/* Per-thread guard so a VM/VPM envelope overflow detected inside the NF
+   computation fails a single polytope gracefully — longjmp back to the
+   caller, which records it as a normal NF failure (result->ok == 0) — instead
+   of aborting the whole process with exit().  A batch classifier can then
+   survive a pathological weight system instead of dying silently mid-run.
+   The classifier arms the guard and installs the jmp target around each NF
+   call (see palp_api.h); standalone PALP tools leave it disarmed and keep the
+   original exit() behaviour. */
+__thread jmp_buf palp_nf_abort_env;
+__thread int     palp_nf_abort_armed = 0;
 
 #define SORT_CWS (0)
 #define FIB_PERM (27) /* print permutation for p<=# */
@@ -28,8 +40,18 @@
 #else
 
 #define NFX_Limit 1631721 /* 1631721 1 903 37947 233103 543907 815860    */
-#define X_Limit 3263441   /* 3263442 1 1806 75894 466206 1087814 1631721 */
-#define VPM_Limit 3263442 /* 1631721 1 903 37947 233103 543907 815860    */
+/* X_Limit / VPM_Limit bound the *input* vertex-matrix (VM) and vertex-pairing-
+   matrix (VPM) entries.  They were tuned to the maximal *reflexive* weight
+   system (D_max = 3263442) but this pipeline also classifies *non-reflexive*
+   IP weight systems, whose VPM entries can legitimately exceed the reflexive
+   ceiling (e.g. 3270666, only 0.2% over).  Long is 64-bit and GL reduction
+   products stay ~entry^2, so 1e8 keeps ~9 orders of headroom below INT64_MAX;
+   the *output* NF entries remain guarded by NFX_Limit (a graceful `return 0`
+   that, empirically, never fired across 136e9 non-reflexive WS), and anything
+   past this input limit now fails gracefully via the palp_nf_abort guard
+   rather than aborting the process. */
+#define X_Limit 100000000   /* was 3263441 (reflexive D_max-1) */
+#define VPM_Limit 100000000 /* was 3263442 (reflexive D_max)   */
 
 #endif
 
@@ -309,6 +331,8 @@ void TEST_rVM_VPM(int *d, int *v, int *f, Long X[POLY_Dmax][VERT_Nmax],
         err = x[j][i];
   }
   if (err) {
+    if (palp_nf_abort_armed)
+      longjmp(palp_nf_abort_env, 1); /* graceful per-polytope skip */
     printf("TEST_VM_VPM: limits exceeded %d\n", err);
     printf("%d %d VM[%d][%d]:\n", *v, *d, *d, *v);
     for (j = 0; j < *d; j++) {
