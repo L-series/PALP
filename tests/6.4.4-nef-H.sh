@@ -11,7 +11,8 @@
 # from the ends of the lines.
 COMMAND="echo '7 1 1 1 1 1 1 1' | ./nef-${DIM}d.x -f -H | sed 's/ *[0-9]*sec.*//g'"
 DESCRIPTION="nef-${DIM}d.x -H example on page 35"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 7 1 1 1 1 1 1 1 M:1716 7 N:8 7  codim=2 #part=3
 
 
@@ -99,13 +100,13 @@ np=2 d:0 p:1
 EOF
 )
 if [ $DIM -lt 7 ]; then
-   EXPECTED="Please increase POLY_Dmax to at least 7 = 6 + 2 - 1
+  EXPECTED="Please increase POLY_Dmax to at least 7 = 6 + 2 - 1
 (POLY_Dmax >= dim N + codim - 1 is required)"
 else
-    if [ -z "${LONG}" ]; then
-	# This test takes forever to run
-	SKIP=true
-	SKIPREASON="long-running test requires make checklong"
-    fi
+  if [ -z "${LONG}" ]; then
+    # This test takes forever to run
+    SKIP=true
+    SKIPREASON="long-running test requires make checklong"
+  fi
 fi
 run_test "${SKIP}" "${SKIPREASON}"

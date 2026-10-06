@@ -9,7 +9,8 @@
 # Page 59
 COMMAND="echo '8 4 1 1 1 1 0 6 3 1 0 1 0 1' | ./mori-${DIM}d.x -fI"
 DESCRIPTION="mori-${DIM}d.x -fI example on page 59"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 Incidence: 110101 111100 011111 101011 101110 100111 111001
 EOF
 )

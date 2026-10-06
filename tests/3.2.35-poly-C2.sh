@@ -9,7 +9,8 @@
 # Pages 21
 COMMAND="./poly-${DIM}d.x -C2 tests/input/3.2.35-poly-C2.txt"
 DESCRIPTION="poly-${DIM}d.x -C2 example on page 21"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 pic=1  deg=64  h12= 0  rk=0 #sq=0 #dp=0 py=1  F=5 10 10 5 #Fano=1
 4 5  Vertices of P* (N-lattice)    M:201 5 N:7 5
  1  0  0  0 -1
@@ -24,7 +25,7 @@ P/2:  0  0  0  0  1   0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
 EOF
 )
 if [ $DIM -lt 6 ]; then
-    SKIP=true
-    SKIPREASON="unknown, pre-existing output deviation"
+  SKIP=true
+  SKIPREASON="unknown, pre-existing output deviation"
 fi
 run_test "${SKIP}" "${SKIPREASON}"

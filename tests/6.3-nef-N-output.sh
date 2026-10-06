@@ -11,7 +11,8 @@
 # from the ends of the lines.
 COMMAND="./nef-${DIM}d.x -N tests/input/6.3-nef-N-output.txt | sed 's/ *[0-9]*sec.*//g'"
 DESCRIPTION="nef-${DIM}d.x -N output example on page 33"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 M:300 18 N:9 8  codim=2 #part=15
 H:3 51 [-96] P:0 V:2 3 4 7
 H:3 51 [-96] P:1 V:2 4 6 7
@@ -28,7 +29,7 @@ np=11 d:2 p:2
 EOF
 )
 if [ $DIM -lt 6 ]; then
-   EXPECTED="Please increase POLY_Dmax to at least 6 = 5 + 2 - 1
+  EXPECTED="Please increase POLY_Dmax to at least 6 = 5 + 2 - 1
 (POLY_Dmax >= dim N + codim - 1 is required)"
 fi
 run_test

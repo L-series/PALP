@@ -9,7 +9,8 @@
 # Page 60
 COMMAND="echo '16 8 4 2 1 1' | ./mori-${DIM}d.x -fP"
 DESCRIPTION="mori-${DIM}d.x -fP example on page 60"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 4 9  points of P* and IP-simplices
    -1    0    0    2    0    0    0    1    0
    -1    0    0    1    2    0    1    1    0

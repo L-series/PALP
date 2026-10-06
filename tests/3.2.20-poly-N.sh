@@ -14,7 +14,8 @@ DESCRIPTION="poly-${DIM}d.x -N first example on page 16"
 # informational, so it shouldn't trigger a failure.
 _perm=43210
 [ $DIM -lt 6 ] && _perm=43201
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 4 5  Normal form of vertices of P    perm=${_perm}
    1   0   0   0 -42
    0   1   0   0 -28

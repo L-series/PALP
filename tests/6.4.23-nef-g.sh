@@ -9,7 +9,8 @@
 # Page 51
 COMMAND="./nef-${DIM}d.x -N -g2 tests/input/6.4.23-nef-g.txt"
 DESCRIPTION="nef-${DIM}d.x -N -g2 example on page 51"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 M:300 18 N:9 8  codim=2 #part=15
 7 10 Points of PG: (nv=8)
     1    1    0    0    0    1    1    0    0    1
@@ -102,7 +103,7 @@ M:300 18 N:9 8  codim=2 #part=15
 EOF
 )
 if [ $DIM -lt 6 ]; then
-    EXPECTED="Please increase POLY_Dmax to at least 6 = 5 + 2 - 1
+  EXPECTED="Please increase POLY_Dmax to at least 6 = 5 + 2 - 1
 (POLY_Dmax >= dim N + codim - 1 is required)"
 fi
 run_test

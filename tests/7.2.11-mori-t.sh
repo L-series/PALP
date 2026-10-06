@@ -9,7 +9,8 @@
 # Page 63
 COMMAND="echo '8 4 1 1 1 1 0 6 3 1 0 1 0 1' | ./mori-${DIM}d.x -ft | head -n37"
 DESCRIPTION="mori-${DIM}d.x -ft example on page 63"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 SINGULAR -> triple intersection numbers:
 d6^3->2,
 d5*d6^2->2,

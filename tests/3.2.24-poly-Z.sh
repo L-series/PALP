@@ -9,7 +9,8 @@
 # Page 17-18
 COMMAND="./poly-${DIM}d.x -VZD tests/input/3.2.24-poly-Z.txt"
 DESCRIPTION="poly-${DIM}d.x -Z example on pages 17-18"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 3 5  vertices of P-dual and IP-simplices
    -1   -1    2    0    0
    -1    2   -1    0    0

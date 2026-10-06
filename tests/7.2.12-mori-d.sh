@@ -14,7 +14,8 @@ DESCRIPTION="mori-${DIM}d.x -d example on page 64"
 # permutation (it looks like divisors two and four are switched).
 # This might be due to a change in Singular, but in any case, I'm
 # basically guessint that it shouldn't be fatal.
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 SINGULAR -> topological quantities of the toric divisors:
 Euler characteristics: 46 9 46 46 46 55 
 Arithmetic genera: 4 1 4 4 4 5 
@@ -22,4 +23,3 @@ dPs: 1 ; d2(6)  nonint: 1 ; d2
 EOF
 )
 run_test
-

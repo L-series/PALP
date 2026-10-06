@@ -10,7 +10,8 @@
 # The "sed" command strips the unpredictable timing information
 COMMAND="echo '14 1 1 1 1 4 6' | ./nef-${DIM}d.x -f -Lv | sed 's/ *[0-9]*sec.*//g'"
 DESCRIPTION="nef-${DIM}d.x -Lv example on page 48"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 14 1 1 1 1 4 6 M:1271 13 N:10 8  codim=2 #part=2
 5 8 Vertices in N-lattice:
     0   -1    0    0    0    1    0    0
@@ -27,7 +28,7 @@ np=1 d:0 p:1
 EOF
 )
 if [ $DIM -lt 6 ]; then
-   EXPECTED="Please increase POLY_Dmax to at least 6 = 5 + 2 - 1
+  EXPECTED="Please increase POLY_Dmax to at least 6 = 5 + 2 - 1
 (POLY_Dmax >= dim N + codim - 1 is required)"
 fi
 run_test
@@ -36,7 +37,8 @@ run_test
 # The "sed" command strips the unpredictable timing information
 COMMAND="echo '14 1 1 1 1 4 6 d=2 12' | ./nef-${DIM}d.x -f -Lv -m | sed 's/ *[0-9]*sec.*//g'"
 DESCRIPTION="nef-${DIM}d.x -Lv m example on pages 48-49"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 14 1 1 1 1 4 6 d=2 12 M:1270 12 N:11 7  codim=2 #part=2
 5 7 Vertices in N-lattice:
     0   -1    0    0    0    1    0
@@ -52,6 +54,6 @@ np=1 d:0 p:1
 EOF
 )
 if [ $DIM -lt 6 ]; then
-    EXPECTED="Please increase POLY_Dmax (POLY_Dmax >= number of weights is required)"
+  EXPECTED="Please increase POLY_Dmax (POLY_Dmax >= number of weights is required)"
 fi
 run_test

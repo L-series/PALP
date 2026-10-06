@@ -9,7 +9,8 @@
 # Page 65
 COMMAND="./mori-${DIM}d.x -DP tests/input/7.2.14-mori-D.txt"
 DESCRIPTION="mori-${DIM}d.x -DP example on page 65"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 4 9  points of P* and IP-simplices
    -1    2    0    0    0    0    0    1    0
    -1    1    2    0    0    0    1    1    0
@@ -22,4 +23,3 @@ EXPECTED=$(cat<<-EOF
 EOF
 )
 run_test
-

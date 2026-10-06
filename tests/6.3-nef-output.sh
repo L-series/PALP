@@ -12,7 +12,8 @@
 INPUT="3 1 1 1 0 0 0 0 0 2 0 0 0 1 1 0 0 0 3 0 0 0 0 0 1 1 1"
 COMMAND="echo '${INPUT}' | ./nef-${DIM}d.x -f | sed 's/ *[0-9]*sec.*//g'"
 DESCRIPTION="nef-${DIM}d.x output example on page 32"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 3 1 1 1 0 0 0 0 0  2 0 0 0 1 1 0 0 0  3 0 0 0 0 0 1 1 1 M:300 18 N:9 8  codim=2 #part=15
 H:19 19 [0] P:0 V:2 4 6 7
 H:9 27 [-36] P:2 V:3 4 6 7
@@ -29,7 +30,7 @@ np=11 d:2 p:2
 EOF
 )
 if [ $DIM -lt 6 ]; then
-   EXPECTED="Please increase POLY_Dmax to at least 6 = 5 + 2 - 1
+  EXPECTED="Please increase POLY_Dmax to at least 6 = 5 + 2 - 1
 (POLY_Dmax >= dim N + codim - 1 is required)"
 fi
 run_test

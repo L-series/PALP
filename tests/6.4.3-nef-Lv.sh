@@ -11,7 +11,8 @@
 # from the ends of the lines.
 COMMAND="./nef-${DIM}d.x -Lv tests/input/6.4.3-nef-Lv.1.txt | sed 's/ *[0-9]*sec.*//g'"
 DESCRIPTION="nef-${DIM}d.x -Lv example on page 34"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 M:5 4 N:35 4  codim=2 #part=0
 3 4 Vertices in N-lattice:
    -1   -1   -1    3
@@ -28,11 +29,10 @@ EOF
 #fi
 run_test
 
-
-
 COMMAND="./nef-${DIM}d.x -Lv -N tests/input/6.4.3-nef-Lv.2.txt | sed 's/ *[0-9]*sec.*//g'"
 DESCRIPTION="nef-${DIM}d.x -Lv -N example on pages 34-35"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 M:35 4 N:5 4  codim=2 #part=2
 3 4 Vertices in N-lattice:
    -1    0    0    1

@@ -11,7 +11,8 @@
 # from the ends of the lines.
 COMMAND="echo '4 1 1 1 1' | ./nef-${DIM}d.x -f -S | sed 's/ *[0-9]*sec.*//g'"
 DESCRIPTION="nef-${DIM}d.x -S example on page 44"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 4 1 1 1 1 M:35 4 N:5 4  codim=2 #part=2
 
 

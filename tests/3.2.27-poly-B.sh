@@ -12,7 +12,8 @@
 # vol=... header appears before the coordinates.
 COMMAND="./poly-${DIM}d.x -B2 tests/input/3.2.27-poly-B.txt | sort -br"
 DESCRIPTION="poly-${DIM}d.x -B2 example on pages 19-20"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 vol=5, baricent=(5,0,0,0,0)/6
 IPs:
  2 2 0 0 0  cd=4

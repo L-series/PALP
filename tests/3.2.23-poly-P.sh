@@ -9,7 +9,8 @@
 # Page 17
 COMMAND="echo '6 1 2 3' | ./poly-${DIM}d.x -fP"
 DESCRIPTION="poly-${DIM}d.x -P example on page 17"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 2 7  points of P-dual and IP-simplices
     1    0   -2   -1    0   -1    0
     0    1   -3   -2   -1   -1    0
@@ -21,9 +22,10 @@ EXPECTED=$(cat<<-EOF
 EOF
 )
 if [ $DIM -lt 6 ]; then
-    # In this example, the first and third COLUMNS
-    # are switched for POLY_Dmax < 6.
-    EXPECTED=$(cat<<-EOF
+  # In this example, the first and third COLUMNS
+  # are switched for POLY_Dmax < 6.
+  EXPECTED=$(
+    cat <<-EOF
 2 7  points of P-dual and IP-simplices
    -2    0    1   -1    0   -1    0
    -3    1    0   -2   -1   -1    0
@@ -33,6 +35,6 @@ if [ $DIM -lt 6 ]; then
     0    1    1    0    0    1   3=d  codim=0
     0    1    0    0    1    0   2=d  codim=1
 EOF
-   )
+  )
 fi
 run_test

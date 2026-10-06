@@ -12,7 +12,8 @@
 INPUT="3 1 1 1 0 0 0 3 0 0 0 1 1 1"
 COMMAND="echo '${INPUT}' | ./nef-${DIM}d.x -f -s -Lv | sed 's/ *[0-9]*sec.*//g'"
 DESCRIPTION="nef-${DIM}d.x -s -Lv example on page 45"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 3 1 1 1 0 0 0  3 0 0 0 1 1 1 M:100 9 N:7 6  codim=2 #part=31
 4 6 Vertices in N-lattice:
     0    0    0    1    0   -1
@@ -50,10 +51,10 @@ np=24 d:1 p:6
 EOF
 )
 if [ $DIM -lt 5 ]; then
-   EXPECTED="Please increase POLY_Dmax to at least 5 = 4 + 2 - 1
+  EXPECTED="Please increase POLY_Dmax to at least 5 = 4 + 2 - 1
 (POLY_Dmax >= dim N + codim - 1 is required)"
 elif [ $DIM -eq 5 ]; then
-    SKIP=1
-    SKIPREASON="Unknown, pre-existing output deviation"
+  SKIP=1
+  SKIPREASON="Unknown, pre-existing output deviation"
 fi
 run_test "${SKIP}" "${SKIPREASON}"

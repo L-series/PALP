@@ -10,7 +10,8 @@
 INPUT="8 4 1 1 1 1 0 6 3 1 0 1 0 1"
 COMMAND="echo '${INPUT}' | ./mori-${DIM}d.x -fP"
 DESCRIPTION="mori-${DIM}d.x -P example on pages 57-58"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 4 8  points of P* and IP-simplices
    -1    0    0    0    1    3    1    0
     0    0    0    1    0   -1    0    0

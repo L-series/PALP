@@ -12,7 +12,8 @@
 INPUT="5 1 1 1 1 1 0 0 10 2 2 2 2 0 1 1"
 COMMAND="echo '${INPUT}' | ./nef-${DIM}d.x -f -Lp | sed 's/ *[0-9]*sec.*//g'"
 DESCRIPTION="nef-${DIM}d.x -Lp example on pages 37-38"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 5 1 1 1 1 1 0 0  10 2 2 2 2 0 1 1 M:378 6 N:8 6  codim=2 #part=4
 5 8  Points of Poly in N-Lattice:
    -1    0    0    0    1    0    0    0
@@ -30,7 +31,7 @@ np=3 d:0 p:1
 EOF
 )
 if [ $DIM -lt 6 ]; then
-   EXPECTED="Please increase POLY_Dmax to at least 6 = 5 + 2 - 1
+  EXPECTED="Please increase POLY_Dmax to at least 6 = 5 + 2 - 1
 (POLY_Dmax >= dim N + codim - 1 is required)"
 fi
 run_test

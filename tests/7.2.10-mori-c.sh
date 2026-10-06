@@ -9,7 +9,8 @@
 # Page 62
 COMMAND="echo '8 4 1 1 1 1 0 6 3 1 0 1 0 1' | ./mori-${DIM}d.x -fc"
 DESCRIPTION="mori-${DIM}d.x -fc example on page 62"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 SINGULAR -> divisor classes (integral basis J1 ... J2):
 d1=J1+3*J2, d2=J1, d3=-J1+J2, d4=J2, d5=J1, d6=J2
 SINGULAR  -> Chern classes of the CY-hypersurface:

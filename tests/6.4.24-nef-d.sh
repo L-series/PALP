@@ -9,7 +9,8 @@
 # Page 52
 COMMAND="./nef-${DIM}d.x -N -d2 tests/input/6.4.24-nef-d.txt"
 DESCRIPTION="nef-${DIM}d.x -N -d2 example on page 52"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 M:300 18 N:9 8  codim=2 #part=15
 7 63 Points of dual PG: (nv=27)
    1   0   1   0   0   1   1   1   0   0   0   0   0   1   1   0   0   0   0   0   1   0   0   0   0   1   0   1   1   1   1   1   1   1   1   1   1   0   1   0   0   0   0   1   1   1   1   1   1   0   0   0   1   1   1   1   1   1   1   1   1   0   1
@@ -102,17 +103,17 @@ M:300 18 N:9 8  codim=2 #part=15
 EOF
 )
 if [ $DIM -lt 6 ]; then
-    EXPECTED="Please increase POLY_Dmax to at least 6 = 5 + 2 - 1
+  EXPECTED="Please increase POLY_Dmax to at least 6 = 5 + 2 - 1
 (POLY_Dmax >= dim N + codim - 1 is required)"
 fi
 run_test
-
 
 # Pages 53-54
 # The "sed" command strips the unpredictable timing information
 COMMAND="./nef-${DIM}d.x -N -Lv tests/input/6.4.24-nef-N-Lv.txt | sed 's/ *[0-9]*sec.*//g'"
 DESCRIPTION="nef-${DIM}d.x -N -Lv example on pages 53-54"
-EXPECTED=$(cat<<-EOF
+EXPECTED=$(
+  cat <<-EOF
 M:24 15 N:39 12  codim=2 #part=2
 5 12 Vertices in N-lattice:
     0    0   -1    2   -1    0    0    0   -1    2   -1    0
@@ -178,7 +179,7 @@ np=2 d:0 p:0
 EOF
 )
 if [ $DIM -lt 6 ]; then
-    EXPECTED="Please increase POLY_Dmax to at least 6 = 5 + 2 - 1
+  EXPECTED="Please increase POLY_Dmax to at least 6 = 5 + 2 - 1
 (POLY_Dmax >= dim N + codim - 1 is required)"
 fi
 run_test
