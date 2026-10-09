@@ -2045,7 +2045,7 @@ void Make_nno_CWS(FILE *AUXFILE[], int u, int ef) {
               CW.nw = 0;
               RW_TO_CWS(&CW, &W[0], n, (W[1].N + W[2].N - u), n, n);
               W_TO_CWS(&CW, &W[1], (W[0].N - u), W[2].N, n, n);
-              W_TO_CWS(&CW, &W[2], (W[0].N + W[1].N), n, n, n);
+              W_TO_CWS(&CW, &W[2], (W[0].N + W[1].N - u), n, n, n);
               PRINT_CWS(&CW);
             }
         }
