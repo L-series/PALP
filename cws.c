@@ -2156,10 +2156,43 @@ void Make_111_CWS(FILE *AUXFILE[], int ef[]) {
   rewind(AUXFILE[0]);
 }
 
-void Make_222_CWS(FILE *AUXFILE[], int ef[]) {
-  int u = 2, n = 0, l[3];
-  Weight W[3];
+static int SameWeight(const Weight *A, const Weight *B) {
+  int i;
+
+  if ((A->d != B->d) || (A->N != B->N))
+    return 0;
+  for (i = 0; i < A->N; i++)
+    if (A->w[i] != B->w[i])
+      return 0;
+  return 1;
+}
+
+static void Print222Orientation(const Weight W[3], int o1, int o2) {
+  int u = 2, n = 0;
+  Weight V[3];
   CWS CW;
+
+  V[0] = W[0];
+  V[1] = W[1];
+  V[2] = W[2];
+  if (o1)
+    SWAP(&V[1].w[0], &V[1].w[1]);
+  if (o2)
+    SWAP(&V[2].w[0], &V[2].w[1]);
+  CW.nw = 0;
+  RW_TO_CWS(&CW, &V[0], n, (V[1].N + V[2].N - 2 * u), n, n);
+  W_TO_CWS(&CW, &V[1], (V[0].N - u), (V[2].N - u), n, n);
+  W_TO_CWS(&CW, &V[2], (V[0].N - u), n, (V[1].N - u), u);
+  PRINT_CWS(&CW);
+}
+
+/* All three weight systems share the same two coordinates. With W[0]'s pair
+   fixed, every orientation of the W[1] and W[2] pairs is emitted. When W[0]'s
+   pair is symmetric, flipping both other pairs is a coordinate permutation, so
+   only one of each such pair of orientations is needed. */
+void Make_222_CWS(FILE *AUXFILE[], int ef[]) {
+  int l[3], o1, o2;
+  Weight W[3];
 
   l[0] = 0;
   while (READ_Weight(&W[0], AUXFILE[0])) {
@@ -2169,41 +2202,16 @@ void Make_222_CWS(FILE *AUXFILE[], int ef[]) {
       l[2] = 0;
       l[1]++;
       while (READ_Weight(&W[2], AUXFILE[2])) {
+        int asym0 = (W[0].w[0] != W[0].w[1]);
+        int asym1 = (W[1].w[0] != W[1].w[1]);
+        int asym2 = (W[2].w[0] != W[2].w[1]);
+
         l[2]++;
-        if (((l[0] <= l[1]) || !ef[0]) && ((l[1] <= l[2]) || !ef[1])) {
-          CW.nw = 0;
-          RW_TO_CWS(&CW, &W[0], n, (W[1].N + W[2].N - 2 * u), n, n);
-          W_TO_CWS(&CW, &W[1], (W[0].N - u), (W[2].N - u), n, n);
-          W_TO_CWS(&CW, &W[2], (W[0].N - u), n, (W[1].N - u), u);
-          PRINT_CWS(&CW);
-          if (W[0].w[0] == W[0].w[1]) {
-            if ((W[1].w[0] != W[1].w[1]) && (W[2].w[0] != W[2].w[1])) {
-              SWAP(&W[1].w[0], &W[1].w[1]);
-              CW.nw = 0;
-              RW_TO_CWS(&CW, &W[0], n, (W[1].N + W[2].N - 2 * u), n, n);
-              W_TO_CWS(&CW, &W[1], (W[0].N - u), (W[2].N - u), n, n);
-              W_TO_CWS(&CW, &W[2], (W[0].N - u), n, (W[1].N - u), u);
-              PRINT_CWS(&CW);
-            }
-          } else {
-            if ((W[1].w[0] != W[1].w[1]) || (W[2].w[0] != W[2].w[1])) {
-              SWAP(&W[0].w[0], &W[0].w[1]);
-              CW.nw = 0;
-              RW_TO_CWS(&CW, &W[0], n, (W[1].N + W[2].N - 2 * u), n, n);
-              W_TO_CWS(&CW, &W[1], (W[0].N - u), (W[2].N - u), n, n);
-              W_TO_CWS(&CW, &W[2], (W[0].N - u), n, (W[1].N - u), u);
-              PRINT_CWS(&CW);
-            }
-            if ((W[1].w[0] != W[1].w[1]) && (W[2].w[0] != W[2].w[1])) {
-              SWAP(&W[1].w[0], &W[1].w[1]);
-              CW.nw = 0;
-              RW_TO_CWS(&CW, &W[0], n, (W[1].N + W[2].N - 2 * u), n, n);
-              W_TO_CWS(&CW, &W[1], (W[0].N - u), (W[2].N - u), n, n);
-              W_TO_CWS(&CW, &W[2], (W[0].N - u), n, (W[1].N - u), u);
-              PRINT_CWS(&CW);
-            }
-          }
-        }
+        if (((l[0] <= l[1]) || !ef[0]) && ((l[1] <= l[2]) || !ef[1]))
+          for (o1 = 0; o1 <= asym1; o1++)
+            for (o2 = 0; o2 <= asym2; o2++)
+              if (asym0 || (asym1 ? !o1 : !o2))
+                Print222Orientation(W, o1, o2);
       }
       rewind(AUXFILE[2]);
     }
@@ -2282,7 +2290,8 @@ void Make_211_CWS(FILE *AUXFILE[], int ef) {
           W_TO_CWS(&CW, &W[1], (W[0].N - u), (W[2].N - u), n, n);
           W_TO_CWS(&CW, &W[2], (W[0].N - 2 * u), n, W[1].N, u);
           PRINT_CWS(&CW);
-          if ((W[0].w[0] != W[0].w[1]) && (W[1].w[0] != W[2].w[0])) {
+          /* Swapping W[0]'s pair is a symmetry only if W[1] and W[2] are equal. */
+          if ((W[0].w[0] != W[0].w[1]) && !SameWeight(&W[1], &W[2])) {
             SWAP(&W[0].w[0], &W[0].w[1]);
             CW.nw = 0;
             RW_TO_CWS(&CW, &W[0], n, (W[1].N + W[2].N - 2 * u), n, n);
@@ -2968,9 +2977,9 @@ void Make_IP_CWS(int narg, char *fn[]) {
       for (i = 0; i < nF; i++)
         MakeSelections(INFILE[i], AUXFILE[i], t.u[i]);
       if (t.u[1] == 2)
-        Make_221_CWS(AUXFILE, !strcmp(infile[1], infile[2]));
+        Make_221_CWS(AUXFILE, !strcmp(infile[0], infile[1]));
       else
-        Make_211_CWS(AUXFILE, !strcmp(infile[0], infile[1]));
+        Make_211_CWS(AUXFILE, !strcmp(infile[1], infile[2]));
     } else if ((t.u[0] == t.u[1]) && (t.u[2] == 0)) {
       if ((D[0] + D[1] + D[2] - t.u[0] - d) != 0)
         Die("wrong DIM -cDIM or wrong TYPES -t TYPE1 TYPE2 TYPE3");
