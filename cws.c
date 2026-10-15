@@ -30,10 +30,22 @@ typedef struct {
 } Dim5StructureDescriptor;
 
 typedef struct {
+  int d;
+  int N;
+  Long w[W_Nmax];
+} Dim5WeightEntry;
+
+typedef struct {
+  Dim5WeightEntry *items;
+  long count;
+  long capacity;
+} Dim5WeightPool;
+
+typedef struct {
   const Dim5StructureDescriptor *descriptor;
-  FILE *inputs[NFmax];
+  const Dim5WeightPool *inputs[NFmax];
   int family_groups[NFmax];
-  Weight weights[NFmax];
+  Dim5WeightEntry weights[NFmax];
   long indices[NFmax];
 } Dim5EnumerationContext;
 
@@ -43,6 +55,14 @@ typedef struct {
   int used[DIM5_MAX_ARITY];
   int reachable[DIM5_MAX_ARITY][DIM5_MAX_ARITY];
 } Dim5AutomorphismContext;
+
+typedef struct {
+  PolyPointList *P;
+  PolyPointList *DP;
+} CWSPrintWorkspace;
+
+/* PRINT_CWS reuses one pair of point lists instead of allocating per CWS. */
+static CWSPrintWorkspace gCWSPrintWorkspace = {NULL, NULL};
 
 #define OSL (28) /* opt_string's length */
 
@@ -1684,8 +1704,8 @@ void W_TO_CWS(CWS *, Weight *, int, int, int, int);
 void PRINT_CWS(CWS *);
 void Make_111_CWS(FILE **, int *);
 void Make_nno_CWS(FILE **, int, int);
-void MakeDim5DescriptorCWS(const Dim5StructureDescriptor *descriptor, FILE *AUXFILE[],
-                           int family_groups[]);
+void MakeDim5DescriptorCWS(const Dim5StructureDescriptor *descriptor,
+                           const Dim5WeightPool *AUXPOOL[], int family_groups[]);
 
 void STtmp(FILE *w2FILE, FILE *w3FILE, FILE *w4FILE) {
   int i, j;
@@ -1960,12 +1980,14 @@ void PRINT_CWS(CWS *CW) {
     PolyPointList *P, *DP;
     EqList E;
     VertexNumList V;
-    P = (PolyPointList *)malloc(sizeof(PolyPointList));
-    if (P == NULL)
-      Die("Unable to allocate space for P");
-    DP = (PolyPointList *)malloc(sizeof(PolyPointList));
-    if (DP == NULL)
-      Die("Unable to allocate space for DP");
+    if (gCWSPrintWorkspace.P == NULL)
+      if ((gCWSPrintWorkspace.P = (PolyPointList *)malloc(sizeof(PolyPointList))) == NULL)
+        Die("Unable to allocate space for P");
+    if (gCWSPrintWorkspace.DP == NULL)
+      if ((gCWSPrintWorkspace.DP = (PolyPointList *)malloc(sizeof(PolyPointList))) == NULL)
+        Die("Unable to allocate space for DP");
+    P = gCWSPrintWorkspace.P;
+    DP = gCWSPrintWorkspace.DP;
     CW->index = 1;
     Make_CWS_Points(CW, P);
     if (IP_Check(P, &V, &E)) {
@@ -1983,8 +2005,6 @@ void PRINT_CWS(CWS *CW) {
       assert(IP_Check(DP, &V, &E));
       fprintf(outFILE, "\n");
     }
-    free(DP);
-    free(P);
   }
 #endif
 }
@@ -2530,7 +2550,7 @@ static const Dim5StructureDescriptor *FindDim5StructureDescriptor(int structure_
   return NULL;
 }
 
-static void EmbedWeightInCWS(CWS *CW, const Weight *W, int ambient_vertices,
+static void EmbedWeightInCWS(CWS *CW, const Dim5WeightEntry *W, int ambient_vertices,
                              const int mapping[DIM5_MAX_SIMPLEX_SIZE]) {
   int i;
 
@@ -2559,8 +2579,8 @@ static void EmitDim5DescriptorCWS(Dim5EnumerationContext *context) {
   PRINT_CWS(&CW);
 }
 
-static int Dim5WeightAtCoordinate(const Weight *W, const int mapping[DIM5_MAX_SIMPLEX_SIZE],
-                                  int coordinate) {
+static int Dim5WeightAtCoordinate(const Dim5WeightEntry *W,
+                                  const int mapping[DIM5_MAX_SIMPLEX_SIZE], int coordinate) {
   int i;
 
   for (i = 0; i < W->N; i++)
@@ -2670,13 +2690,14 @@ static int Dim5SelectionOrderIsCanonical(const Dim5EnumerationContext *context, 
 
 static __attribute__((noinline)) void EnumerateDim5Weights(Dim5EnumerationContext *context,
                                                            int slot) {
-  long index = 0;
+  const Dim5WeightPool *pool = context->inputs[slot];
+  long index;
 
   if (slot >= context->descriptor->simplex_count)
     return;
 
-  while (READ_Weight(&context->weights[slot], context->inputs[slot])) {
-    index++;
+  for (index = 1; index <= pool->count; index++) {
+    context->weights[slot] = pool->items[index - 1];
     context->indices[slot] = index;
     if (Dim5SelectionOrderIsCanonical(context, slot)) {
       if (slot + 1 == context->descriptor->simplex_count)
@@ -2686,51 +2707,171 @@ static __attribute__((noinline)) void EnumerateDim5Weights(Dim5EnumerationContex
     }
   }
   context->indices[slot] = 0;
-  rewind(context->inputs[slot]);
 }
 
-void MakeDim5DescriptorCWS(const Dim5StructureDescriptor *descriptor, FILE *AUXFILE[],
-                           int family_groups[]) {
+void MakeDim5DescriptorCWS(const Dim5StructureDescriptor *descriptor,
+                           const Dim5WeightPool *AUXPOOL[], int family_groups[]) {
   Dim5EnumerationContext context;
   int i;
 
   context.descriptor = descriptor;
   for (i = 0; i < DIM5_MAX_ARITY; i++) {
-    context.inputs[i] = AUXFILE[i];
+    context.inputs[i] = AUXPOOL[i];
     context.family_groups[i] = family_groups[i];
     context.indices[i] = 0;
   }
   EnumerateDim5Weights(&context, 0);
 }
 
-static void BuildDim5BuiltinFiles(FILE *weight_files[], int need_five_weights) {
-  FILE *saved_outFILE = outFILE;
+static void InitDim5WeightPool(Dim5WeightPool *pool) {
+  pool->items = NULL;
+  pool->count = 0;
+  pool->capacity = 0;
+}
+
+static void FreeDim5WeightPool(Dim5WeightPool *pool) {
+  free(pool->items);
+  InitDim5WeightPool(pool);
+}
+
+static void AppendDim5WeightEntry(Dim5WeightPool *pool, const Dim5WeightEntry *entry) {
+  if (pool->count == pool->capacity) {
+    long capacity = pool->capacity ? 2 * pool->capacity : 64;
+    Dim5WeightEntry *items =
+        (Dim5WeightEntry *)realloc(pool->items, (size_t)capacity * sizeof(Dim5WeightEntry));
+
+    if (items == NULL)
+      DieFailure("Unable to allocate dim-5 weight pool");
+    pool->items = items;
+    pool->capacity = capacity;
+  }
+  pool->items[pool->count++] = *entry;
+}
+
+static void AppendDim5Weight(Dim5WeightPool *pool, int degree, int count, const Long *weights) {
+  Dim5WeightEntry entry;
   int i;
 
-  for (i = 0; i <= DIM5_MAX_SIMPLEX_SIZE; i++)
-    weight_files[i] = NULL;
+  memset(&entry, 0, sizeof(entry));
+  entry.d = degree;
+  entry.N = count;
+  for (i = 0; i < count; i++)
+    entry.w[i] = weights[i];
+  AppendDim5WeightEntry(pool, &entry);
+}
 
-  if ((weight_files[2] = tmpfile()) == NULL)
-    Die("Unable to open tmpfile for read/write");
-  if ((weight_files[3] = tmpfile()) == NULL)
-    Die("Unable to open tmpfile for read/write");
-  if ((weight_files[4] = tmpfile()) == NULL)
-    Die("Unable to open tmpfile for read/write");
-  STtmp(weight_files[2], weight_files[3], weight_files[4]);
+static void LoadDim5WeightPool(FILE *input, Dim5WeightPool *pool) {
+  Weight weight;
+
+  while (READ_Weight(&weight, input))
+    AppendDim5Weight(pool, weight.d, weight.N, weight.w);
+  rewind(input);
+}
+
+/* In-memory equivalent of Select_n_of_W: selected weights first, in the same
+   order, followed by the unselected weights in their original order. */
+static void AppendDim5Selection(const Dim5WeightEntry *source, const int *selected, int count,
+                                Dim5WeightPool *pool) {
+  Long weights[W_Nmax];
+  int i, next = 0, position = 0;
+
+  for (i = 0; i < count; i++)
+    weights[position++] = source->w[selected[i]];
+  for (i = 0; i < source->N; i++)
+    if ((next < count) && (i == selected[next]))
+      next++;
+    else
+      weights[position++] = source->w[i];
+  assert(position == source->N);
+  AppendDim5Weight(pool, source->d, source->N, weights);
+}
+
+static void EnumerateDim5Selections(const Dim5WeightEntry *source, int count, int selected[],
+                                    int chosen, Dim5WeightPool *pool) {
+  int i, last;
+
+  if (chosen == count) {
+    AppendDim5Selection(source, selected, count, pool);
+    return;
+  }
+  last = selected[chosen - 1];
+  if (last == source->N - 1)
+    return;
+  if (source->w[last + 1] == source->w[last]) {
+    selected[chosen] = last + 1;
+    EnumerateDim5Selections(source, count, selected, chosen + 1, pool);
+  }
+  for (i = last + 1; i < source->N; i++)
+    if (source->w[i] > source->w[i - 1]) {
+      selected[chosen] = i;
+      EnumerateDim5Selections(source, count, selected, chosen + 1, pool);
+    }
+}
+
+static void SelectDim5Weights(const Dim5WeightPool *source, int count, Dim5WeightPool *pool) {
+  int selected[W_Nmax];
+  long k;
+  int i;
+
+  for (k = 0; k < source->count; k++) {
+    const Dim5WeightEntry *entry = &source->items[k];
+
+    if (count == 0) {
+      AppendDim5WeightEntry(pool, entry);
+      continue;
+    }
+    for (i = 1; i < entry->N; i++)
+      if (entry->w[i] < entry->w[i - 1])
+        Die("Weights must be sortet: W_1 <= W_2 <= .... <=W_N!");
+    selected[0] = 0;
+    EnumerateDim5Selections(entry, count, selected, 1, pool);
+    for (i = 1; i < entry->N; i++)
+      if (entry->w[i] > entry->w[i - 1]) {
+        selected[0] = i;
+        EnumerateDim5Selections(entry, count, selected, 1, pool);
+      }
+  }
+}
+
+static void BuildDim5BuiltinPools(Dim5WeightPool pools[], int need_five_weights) {
+  Long weights[W_Nmax];
+  int i, j;
+
+  for (i = 0; i <= DIM5_MAX_SIMPLEX_SIZE; i++)
+    InitDim5WeightPool(&pools[i]);
+
+  for (j = 0; j < 2; j++)
+    weights[j] = W2.w[j];
+  AppendDim5Weight(&pools[2], W2.d, 2, weights);
+  for (i = 0; i < 3; i++) {
+    for (j = 0; j < 3; j++)
+      weights[j] = W3[i].w[j];
+    AppendDim5Weight(&pools[3], W3[i].d, 3, weights);
+  }
+  for (i = 0; i < 95; i++) {
+    for (j = 0; j < 4; j++)
+      weights[j] = W4[i].w[j];
+    AppendDim5Weight(&pools[4], W4[i].d, 4, weights);
+  }
 
   if (need_five_weights) {
-    if ((weight_files[5] = tmpfile()) == NULL)
+    FILE *generated, *saved_outFILE = outFILE;
+
+    if ((generated = tmpfile()) == NULL)
       Die("Unable to open tmpfile for read/write");
-    outFILE = weight_files[5];
+    outFILE = generated;
     Make_34_Weights(4, 0, 0);
     outFILE = saved_outFILE;
-    rewind(weight_files[5]);
+    rewind(generated);
+    LoadDim5WeightPool(generated, &pools[5]);
+    fclose(generated);
   }
 }
 
 void Make_5_CWS(int structure_id) {
-  FILE *weight_files[DIM5_MAX_SIMPLEX_SIZE + 1];
-  FILE *AUXFILE[DIM5_MAX_ARITY] = {NULL};
+  Dim5WeightPool base_pools[DIM5_MAX_SIMPLEX_SIZE + 1];
+  Dim5WeightPool selections[DIM5_MAX_ARITY];
+  const Dim5WeightPool *AUXPOOL[DIM5_MAX_ARITY] = {NULL};
   int family_groups[DIM5_MAX_ARITY] = {0};
   int orbit_groups[DIM5_MAX_ARITY] = {0};
   int need_five_weights = 0, matched = 0, i, j;
@@ -2747,7 +2888,7 @@ void Make_5_CWS(int structure_id) {
   if (!matched)
     DieFailure("unknown canonical dim-5 structure id");
 
-  BuildDim5BuiltinFiles(weight_files, need_five_weights);
+  BuildDim5BuiltinPools(base_pools, need_five_weights);
 
   for (i = 0; i < (int)(sizeof(kDim5Structures) / sizeof(kDim5Structures[0])); i++) {
     const Dim5StructureDescriptor *descriptor = &kDim5Structures[i];
@@ -2757,24 +2898,21 @@ void Make_5_CWS(int structure_id) {
     ComputeDim5SlotOrbitGroups(descriptor, orbit_groups);
 
     for (j = 0; j < descriptor->simplex_count; j++) {
-      if ((AUXFILE[j] = tmpfile()) == NULL)
-        Die("Unable to open tmpfile to read/write");
-      MakeSelections(weight_files[descriptor->simplex_sizes[j]], AUXFILE[j],
-                     descriptor->shared_counts[j]);
+      InitDim5WeightPool(&selections[j]);
+      SelectDim5Weights(&base_pools[descriptor->simplex_sizes[j]], descriptor->shared_counts[j],
+                        &selections[j]);
+      AUXPOOL[j] = &selections[j];
       family_groups[j] = Dim5CombineFamilyGroup(descriptor->simplex_sizes[j], orbit_groups[j]);
     }
 
-    MakeDim5DescriptorCWS(descriptor, AUXFILE, family_groups);
+    MakeDim5DescriptorCWS(descriptor, AUXPOOL, family_groups);
 
-    for (j = 0; j < descriptor->simplex_count; j++) {
-      fclose(AUXFILE[j]);
-      AUXFILE[j] = NULL;
-    }
+    for (j = 0; j < descriptor->simplex_count; j++)
+      FreeDim5WeightPool(&selections[j]);
   }
 
-  for (i = 2; i <= DIM5_MAX_SIMPLEX_SIZE; i++)
-    if (weight_files[i] != NULL)
-      fclose(weight_files[i]);
+  for (i = 0; i <= DIM5_MAX_SIMPLEX_SIZE; i++)
+    FreeDim5WeightPool(&base_pools[i]);
 }
 
 void PrintCWSTypes(void) {
@@ -2907,6 +3045,8 @@ void Make_IP_CWS(int narg, char *fn[]) {
       Die("Unable to open infile to read");
   }
   if (structure_id) {
+    Dim5WeightPool selections[NFmax];
+    const Dim5WeightPool *AUXPOOL[NFmax] = {NULL};
     int orbit_groups[DIM5_MAX_ARITY] = {0};
     int source_groups[DIM5_MAX_ARITY] = {0};
 
@@ -2921,7 +3061,14 @@ void Make_IP_CWS(int narg, char *fn[]) {
         DieFailure("wrong input file dimensions for selected dim-5 structure");
     ComputeDim5SlotOrbitGroups(descriptor, orbit_groups);
     for (i = 0; i < nF; i++) {
-      MakeSelections(INFILE[i], AUXFILE[i], descriptor->shared_counts[i]);
+      Dim5WeightPool input;
+
+      InitDim5WeightPool(&input);
+      LoadDim5WeightPool(INFILE[i], &input);
+      InitDim5WeightPool(&selections[i]);
+      SelectDim5Weights(&input, descriptor->shared_counts[i], &selections[i]);
+      FreeDim5WeightPool(&input);
+      AUXPOOL[i] = &selections[i];
       source_groups[i] = i + 1;
       for (j = 0; j < i; j++)
         if (!strcmp(infile[i], infile[j])) {
@@ -2930,7 +3077,9 @@ void Make_IP_CWS(int narg, char *fn[]) {
         }
       family_groups[i] = Dim5CombineFamilyGroup(source_groups[i], orbit_groups[i]);
     }
-    MakeDim5DescriptorCWS(descriptor, AUXFILE, family_groups);
+    MakeDim5DescriptorCWS(descriptor, AUXPOOL, family_groups);
+    for (i = 0; i < nF; i++)
+      FreeDim5WeightPool(&selections[i]);
   } else if (nF == 2) {
     if (!t.nu)
       assert((u = D[0] + D[1] - d) >= 0);
