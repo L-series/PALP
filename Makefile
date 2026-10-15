@@ -65,7 +65,7 @@ Nefpart.o:	Global.h Nef.h
 
 poly.o:         Global.h LG.h
 class.o:	Global.h Subpoly.h
-cws.o:		Global.h LG.h Rat.h
+cws.o:		Global.h LG.h Rat.h dim5_structures.inc
 nef.o:          Global.h Nef.h LG.h
 mori.o:     Global.h Rat.h LG.h
 

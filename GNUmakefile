@@ -108,7 +108,7 @@ SingularInput-$(2)d.o: Mori.h Global.h
 
 poly-$(2)d.o:          LG.h Global.h
 class-$(2)d.o:         Subpoly.h Global.h
-cws-$(2)d.o:           LG.h Rat.h Global.h
+cws-$(2)d.o:           LG.h Rat.h Global.h dim5_structures.inc
 nef-$(2)d.o:           Nef.h LG.h Global.h
 mori-$(2)d.o:          LG.h Mori.h Global.h
 endef
